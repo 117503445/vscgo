@@ -1,0 +1,154 @@
+:root {
+  color-scheme: dark;
+  font-family: 'Segoe UI', 'SF Pro Display', sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(76, 117, 255, 0.18), transparent 28rem),
+    linear-gradient(180deg, #181d23 0%, #0d1117 100%);
+  color: #d7dae0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: transparent;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(7, 10, 14, 0.78);
+  backdrop-filter: blur(16px);
+  padding: 16px 12px;
+}
+
+.main-pane {
+  display: grid;
+  grid-template-rows: auto 1fr 280px;
+  min-height: 100vh;
+}
+
+.titlebar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(13, 17, 23, 0.78);
+  backdrop-filter: blur(14px);
+}
+
+.title {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.subtitle,
+.workspace-root,
+.panel-title,
+.file-kind {
+  color: #8b98a5;
+}
+
+.panel-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.workspace-root {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.file-item,
+.save-button {
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.file-item {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #d7dae0;
+  text-align: left;
+}
+
+.file-item.active {
+  background: rgba(68, 128, 255, 0.24);
+}
+
+.file-item:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.save-button {
+  padding: 10px 16px;
+  background: linear-gradient(135deg, #4f8cff, #3dc6ff);
+  color: #071018;
+  font-weight: 700;
+}
+
+.editor-pane {
+  min-height: 0;
+}
+
+.terminal-pane {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(7, 10, 14, 0.9);
+  padding: 12px 16px 16px;
+}
+
+.terminal-surface {
+  height: calc(100% - 28px);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #11161c;
+}
+
+@media (max-width: 960px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .main-pane {
+    grid-template-rows: auto 420px 260px;
+  }
+}
