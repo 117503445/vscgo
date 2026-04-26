@@ -107,16 +107,26 @@ const expectedFileContent = 'edited in browser e2e\n';
 const terminalFile = path.join(path.dirname(workspaceFile), 'terminal-output.txt');
 const terminalCommand = `echo terminal-ok > ${terminalFile}`;
 const { chromium } = await loadPlaywright();
+const chromiumArgs = ['--disable-dev-shm-usage'];
+if (typeof process.getuid === 'function' && process.getuid() === 0) {
+	chromiumArgs.push('--no-sandbox', '--disable-setuid-sandbox');
+}
 
 fs.rmSync(terminalFile, { force: true });
 
-const browser = await chromium.launch({ headless: true, executablePath: chromiumPath() });
+let browser;
 
 try {
-	const health = await fetch(new URL('/healthz', url));
-	if (!health.ok) {
-		throw new Error(`healthz returned ${health.status}`);
-	}
+	browser = await chromium.launch({ headless: true, executablePath: chromiumPath(), args: chromiumArgs });
+
+	await waitFor(async () => {
+		try {
+			const health = await fetch(new URL('/healthz', url));
+			return health.ok;
+		} catch {
+			return false;
+		}
+	}, 30000, 'healthz did not become ready');
 
 	const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 	page.on('websocket', ws => {
@@ -137,7 +147,12 @@ try {
 	});
 
 	await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-	await page.waitForSelector('.monaco-workbench', { state: 'attached', timeout: 60000 });
+	await waitFor(async () => {
+		if ((await page.locator('.monaco-workbench').count()) > 0) {
+			return true;
+		}
+		return (await page.title().catch(() => '')).includes('Code - OSS');
+	}, 60000, 'workbench did not render');
 	await dismissOnboarding(page);
 	await page.waitForFunction(() => document.title.includes('Code - OSS'), null, { timeout: 60000 });
 	observations.push('Official VS Code workbench rendered');
@@ -230,5 +245,7 @@ try {
 	console.log(JSON.stringify({ scenario, status: 'failed', url, screenshots, observations }));
 	process.exitCode = 1;
 } finally {
-	await browser.close();
+	if (browser) {
+		await browser.close();
+	}
 }

@@ -28,48 +28,42 @@
 
 需要：
 
-- Go `1.26.1` 或更新版本
-- `PATH` 上可用的 Node.js
-- 一个已经完成前端构建产物的 VS Code 源码目录
-  - `out/`
-  - `resources/`
-  - `node_modules/@xterm`
+- `PATH` 上可用的 `go-task` 命令
+- `PATH` 上可用的 `podman` 命令
 
-默认情况下，构建脚本会优先把当前仓库目录当作 VS Code 源码目录；如果这里没有这些产物，就需要显式设置 `VSCODE_REPO_ROOT=/path/to/vscode`。
+默认的 `go-task build` / `go-task e2e` / `go-task run` 都通过仓库根目录的 [Dockerfile](/workspace/project/vscgo/Dockerfile:1) 工作：
 
-构建脚本会把这些资源复制到 `dist/`，然后由 Go 二进制通过 `embed` 打包进去。
+- 在容器里 clone `microsoft/vscode`
+- checkout 到固定 commit `50f36fc4ffa240e366be854f001d3f1f7461b0bd`
+- 执行 `npm ci`
+- 执行 `npm run gulp compile-client`
+- 构建并运行 `code-server-go`
+
+这意味着从零开始不需要本地预先准备 `data/`、`dist/`，也不需要本地先把 VS Code 构建产物编出来。
 
 ## 如何构建
 
 在仓库根目录执行：
 
 ```bash
-cd scripts/go-script
-VSCODE_REPO_ROOT=/path/to/vscode go run . build
+go-task build
 ```
 
-这个命令会做两件事：
+这个命令会构建运行镜像：
 
-- 把前端静态资源复制到 `dist/`
-- 构建服务端二进制到 `data/bin/code-server-go`
-
-如果当前仓库本身就放在一个带构建产物的 VS Code 工作树里，可以省略 `VSCODE_REPO_ROOT`。
-
-如果 `dist/` 已经存在，只想单独编译 Go 服务端，可以执行：
-
-```bash
-go build ./cmd/code-server-go
-```
+- 镜像名默认是 `localhost/vscgo:dev`
+- 使用 Podman 的分层缓存
+- 不依赖本地 `data/`
 
 ## 如何运行
 
-服务端会把“当前工作目录”当作工作区根目录。
+`go-task run` 会先执行 `go-task build`，然后直接启动容器。
 
 例如：
 
 ```bash
-cd /path/to/workspace
-CODE_SERVER_GO_ADDR=127.0.0.1:8080 /path/to/vscgo/data/bin/code-server-go
+cd /path/to/vscgo
+go-task run
 ```
 
 然后在浏览器里打开：
@@ -81,29 +75,21 @@ http://127.0.0.1:8080
 说明：
 
 - 如果不设置 `CODE_SERVER_GO_ADDR`，默认监听 `:8080`
-- 浏览器中打开的工作区，就是你启动服务时所在的目录
-
-如果 `dist/` 已经构建好，也可以直接从源码运行：
-
-```bash
-cd /path/to/workspace
-go run /path/to/vscgo/cmd/code-server-go
-```
+- 浏览器中打开的工作区，就是仓库根目录被挂载到容器内的 `/workspace`
 
 ## 如何跑 E2E
 
 执行：
 
 ```bash
-cd scripts/go-script
-VSCODE_REPO_ROOT=/path/to/vscode go run . e2e
+go-task e2e
 ```
 
 这个 e2e 流程会：
 
-- 构建 `dist/` 和服务端二进制
-- 启动一个临时本地服务
-- 用 Playwright 打开官方 VS Code workbench
+- 构建运行镜像和 e2e runner 镜像
+- 启动一个临时 app 容器
+- 在单独的 Playwright 容器里打开官方 VS Code workbench
 - 校验没有 `/oss-dev` websocket
 - 编辑并保存文件
 - 创建终端并执行命令
@@ -112,6 +98,22 @@ VSCODE_REPO_ROOT=/path/to/vscode go run . e2e
 
 ```text
 data/e2e/runs/
+```
+
+## 如何直接用 Podman 构建
+
+如果不走 `go-task`，也可以直接执行：
+
+```bash
+podman build --layers \
+  --build-arg VSCODE_COMMIT=<new-commit> \
+  -t localhost/vscgo:dev .
+```
+
+然后运行：
+
+```bash
+podman run --rm -p 8080:8080 -v /path/to/workspace:/workspace -w /workspace localhost/vscgo:dev
 ```
 
 ## 当前范围

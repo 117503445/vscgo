@@ -1,0 +1,23 @@
+version: "3"
+
+vars:
+  IMAGE_NAME: localhost/vscgo:dev
+  E2E_IMAGE_NAME: localhost/vscgo-e2e:dev
+
+tasks:
+  build:
+    desc: 使用 Podman 从零构建运行镜像
+    cmds:
+      - podman build --layers --target runtime -t '{{.IMAGE_NAME}}' .
+
+  e2e:
+    desc: 构建镜像并运行容器化 Playwright e2e 流程
+    cmds:
+      - ROOT_DIR='{{.ROOT_DIR}}' IMAGE_NAME='{{.IMAGE_NAME}}' E2E_IMAGE_NAME='{{.E2E_IMAGE_NAME}}' ./scripts/podman/e2e.sh
+
+  run:
+    desc: 构建并运行容器，将仓库根目录挂载到 /workspace
+    deps:
+      - build
+    cmds:
+      - podman run --rm --replace --name vscgo -p 8080:8080 -v '{{.ROOT_DIR}}:/workspace' -w /workspace '{{.IMAGE_NAME}}'

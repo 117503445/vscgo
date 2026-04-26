@@ -1,7 +1,4 @@
-data/bin/
-data/e2e/
-data/e2e/runs/
-data/runtime/
+data/
 dist/
 /scripts/go-script/go-script
 /fe/dist/
