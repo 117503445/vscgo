@@ -124,11 +124,38 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Support ?folder= query parameter for workspace switching.
+	// The parameter is relative to the configured workspace root.
+	folderParam := r.URL.Query().Get("folder")
+	workspaceRoot := s.workspaceRoot
+	if folderParam != "" {
+		if !strings.HasPrefix(folderParam, "/") {
+			folderParam = "/" + folderParam
+		}
+		if resolved, ok := s.resolveFolderWithinWorkspace(folderParam); ok {
+			workspaceRoot = resolved
+			// Set cookie for subsequent API calls
+			http.SetCookie(w, &http.Cookie{
+				Name:  "code-server-go-folder",
+				Value: resolved,
+				Path:  "/",
+			})
+		}
+	} else {
+		// Plain load renders the default root; drop any stale folder override.
+		http.SetCookie(w, &http.Cookie{
+			Name:   "code-server-go-folder",
+			Value:  "",
+			Path:   "/",
+			MaxAge: -1,
+		})
+	}
+
 	values := map[string]string{
 		"WORKBENCH_WEB_BASE_URL":       "/static",
-		"WORKBENCH_WEB_CONFIGURATION":  s.asJSON(s.workbenchConfiguration()),
+		"WORKBENCH_WEB_CONFIGURATION":  s.asJSON(s.workbenchConfigurationWithRoot(workspaceRoot)),
 		"WORKBENCH_AUTH_SESSION":       "",
-		"WORKBENCH_BUILTIN_EXTENSIONS": "[]",
+		"WORKBENCH_BUILTIN_EXTENSIONS": s.builtinExtensionsJSON(),
 		"WORKBENCH_DEV_CSS_MODULES":    string(mustJSON(s.cssModules())),
 	}
 
@@ -164,6 +191,9 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := fs.Stat(s.staticFS, relativePath); err == nil {
+		// Embedded files carry no modtime/etag; without this browsers heuristically
+		// cache stale assets across binary upgrades.
+		w.Header().Set("Cache-Control", "no-cache")
 		s.staticHandler.ServeHTTP(w, r)
 		return
 	}
@@ -183,8 +213,37 @@ func (s *Server) renderTemplate(name string, values map[string]string) ([]byte, 
 	return []byte(rendered), nil
 }
 
-func (s *Server) workbenchConfiguration() map[string]any {
-	workspacePath := filepath.ToSlash(s.workspaceRoot)
+func (s *Server) builtinExtensions() []any {
+	// Built-in extensions served from /static/extensions/
+	exts := []struct {
+		name      string
+		version   string
+	}{
+		{"pkief.material-icon-theme", "5.20.0"},
+		{"mechatroner.rainbow-csv", "3.6.0"},
+		{"iliazeus.vscode-ansi", "1.1.4"},
+		{"njzy.stats-bar", "0.5.2"},
+		{"tomoki1207.pdf", "1.2.2"},
+		{"humao.rest-client", "0.25.1"},
+		{"mhutchie.git-graph", "1.30.0"},
+	}
+	var result []any
+	for _, ext := range exts {
+		result = append(result, map[string]any{
+			"name":    ext.name,
+			"version": ext.version,
+			"path":    fmt.Sprintf("/static/extensions/%s-%s.vsix", ext.name, ext.version),
+		})
+	}
+	return result
+}
+
+func (s *Server) builtinExtensionsJSON() string {
+	return s.asJSON(s.builtinExtensions())
+}
+
+func (s *Server) workbenchConfigurationWithRoot(root string) map[string]any {
+	workspacePath := filepath.ToSlash(root)
 	if !strings.HasPrefix(workspacePath, "/") {
 		workspacePath = "/" + workspacePath
 	}
@@ -199,7 +258,7 @@ func (s *Server) workbenchConfiguration() map[string]any {
 			"path":      workspacePath,
 		},
 		"workspaceUri":                nil,
-		"additionalBuiltinExtensions": []any{},
+		"additionalBuiltinExtensions": s.builtinExtensions(),
 		"settingsSyncOptions": map[string]any{
 			"enabled": false,
 		},
@@ -210,7 +269,7 @@ func (s *Server) workbenchConfiguration() map[string]any {
 		},
 		"windowIndicator": map[string]any{
 			"label":   "$(browser) code-server-go",
-			"tooltip": s.workspaceRoot,
+			"tooltip": root,
 		},
 		"productConfiguration": map[string]any{
 			"enableTelemetry": false,
@@ -218,6 +277,9 @@ func (s *Server) workbenchConfiguration() map[string]any {
 	}
 }
 
+func (s *Server) workbenchConfiguration() map[string]any {
+	return s.workbenchConfigurationWithRoot(s.workspaceRoot)
+}
 func (s *Server) cssModules() []string {
 	var modules []string
 	_ = fs.WalkDir(s.staticFS, "out/vs", func(path string, d fs.DirEntry, err error) error {
@@ -252,8 +314,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *Server) handleState(w http.ResponseWriter, _ *http.Request) {
-	tree, err := s.listDir("")
+func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	tree, err := s.listDir(r, "")
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, err)
 		return
@@ -270,7 +332,7 @@ func (s *Server) handleStat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entry, err := s.statPath(r.URL.Query().Get("path"))
+	entry, err := s.statPath(r, r.URL.Query().Get("path"))
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -285,7 +347,7 @@ func (s *Server) handleReaddir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rel := r.URL.Query().Get("path")
-	entries, err := s.listDir(rel)
+	entries, err := s.listDir(r, rel)
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -298,7 +360,7 @@ func (s *Server) handleReaddir(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Query().Get("path")
-	entries, err := s.listDir(rel)
+	entries, err := s.listDir(r, rel)
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -321,7 +383,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
-	abs, err := s.resolvePath(r.URL.Query().Get("path"))
+	abs, err := s.resolvePathForRequest(r, r.URL.Query().Get("path"))
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -339,7 +401,7 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Query().Get("path")
-	abs, err := s.resolvePath(rel)
+	abs, err := s.resolvePathForRequest(r, rel)
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -359,7 +421,7 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entry, err := s.statPath(rel)
+	entry, err := s.statPath(r, rel)
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -374,7 +436,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rel := r.URL.Query().Get("path")
-	abs, err := s.resolvePath(rel)
+	abs, err := s.resolvePathForRequest(r, rel)
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -384,7 +446,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entry, err := s.statPath(rel)
+	entry, err := s.statPath(r, rel)
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -398,7 +460,7 @@ func (s *Server) handleDeleteEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	abs, err := s.resolvePath(r.URL.Query().Get("path"))
+	abs, err := s.resolvePathForRequest(r, r.URL.Query().Get("path"))
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -426,12 +488,12 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromAbs, err := s.resolvePath(payload.From)
+	fromAbs, err := s.resolvePathForRequest(r, payload.From)
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
 	}
-	toAbs, err := s.resolvePath(payload.To)
+	toAbs, err := s.resolvePathForRequest(r, payload.To)
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -445,7 +507,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entry, err := s.statPath(payload.To)
+	entry, err := s.statPath(r, payload.To)
 	if err != nil {
 		s.writeError(w, statusForError(err), err)
 		return
@@ -487,8 +549,8 @@ type FileEntry struct {
 	Ctime int64  `json:"ctime"`
 }
 
-func (s *Server) listDir(rel string) ([]FileEntry, error) {
-	abs, err := s.resolvePath(rel)
+func (s *Server) listDir(r *http.Request, rel string) ([]FileEntry, error) {
+	abs, err := s.resolvePathForRequest(r, rel)
 	if err != nil {
 		return nil, err
 	}
@@ -527,8 +589,8 @@ func (s *Server) listDir(rel string) ([]FileEntry, error) {
 	return result, nil
 }
 
-func (s *Server) statPath(rel string) (FileEntry, error) {
-	abs, err := s.resolvePath(rel)
+func (s *Server) statPath(r *http.Request, rel string) (FileEntry, error) {
+	abs, err := s.resolvePathForRequest(r, rel)
 	if err != nil {
 		return FileEntry{}, err
 	}
@@ -553,17 +615,36 @@ func (s *Server) statPath(rel string) (FileEntry, error) {
 	}, nil
 }
 
-func (s *Server) resolvePath(rel string) (string, error) {
+func (s *Server) resolveFolderWithinWorkspace(folder string) (string, bool) {
+	resolved, err := filepath.Abs(filepath.Join(s.workspaceRoot, folder))
+	if err != nil {
+		return "", false
+	}
+	if resolved != s.workspaceRoot && !strings.HasPrefix(resolved, s.workspaceRoot+string(os.PathSeparator)) {
+		return "", false
+	}
+	return resolved, true
+}
+
+func (s *Server) resolvePathForRequest(r *http.Request, rel string) (string, error) {
+	root := s.workspaceRoot
+	if cookie, err := r.Cookie("code-server-go-folder"); err == nil && cookie.Value != "" {
+		// Cookie is client-supplied; only honor absolute paths inside the workspace root.
+		candidate := filepath.Clean(cookie.Value)
+		if filepath.IsAbs(candidate) && (candidate == s.workspaceRoot || strings.HasPrefix(candidate, s.workspaceRoot+string(os.PathSeparator))) {
+			root = candidate
+		}
+	}
 	clean := filepath.Clean(strings.TrimSpace(rel))
 	if clean == "." || clean == "" {
-		return s.workspaceRoot, nil
+		return root, nil
 	}
-	target := filepath.Join(s.workspaceRoot, clean)
+	target := filepath.Join(root, clean)
 	target, err := filepath.Abs(target)
 	if err != nil {
 		return "", err
 	}
-	if target != s.workspaceRoot && !strings.HasPrefix(target, s.workspaceRoot+string(os.PathSeparator)) {
+	if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
 		return "", os.ErrPermission
 	}
 	return target, nil

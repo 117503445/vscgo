@@ -4,6 +4,8 @@ import { URI } from '/static/out/vs/base/common/uri.js';
 import { IRemoteAgentHostService, NullRemoteAgentHostService } from '/static/out/vs/platform/agentHost/common/remoteAgentHostService.js';
 import { IFileService, FileChangeType, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, createFileSystemProviderError } from '/static/out/vs/platform/files/common/files.js';
 import { InstantiationType, registerSingleton } from '/static/out/vs/platform/instantiation/common/extensions.js';
+import { IFileDialogService } from '/static/out/vs/platform/dialogs/common/dialogs.js';
+import { IContextKeyService } from '/static/out/vs/platform/contextkey/common/contextkey.js';
 import { Registry } from '/static/out/vs/platform/registry/common/platform.js';
 import '/static/out/vs/workbench/workbench.web.main.js';
 import { BrowserMain } from '/static/out/vs/workbench/browser/web.main.js';
@@ -11,6 +13,11 @@ import { Workbench } from '/static/out/vs/workbench/browser/workbench.js';
 import { BasePty } from '/static/out/vs/workbench/contrib/terminal/common/basePty.js';
 import { ITerminalInstanceService, ITerminalService } from '/static/out/vs/workbench/contrib/terminal/browser/terminal.js';
 import { ProcessPropertyType, TerminalExtensions } from '/static/out/vs/platform/terminal/common/terminal.js';
+import { IQuickInputService } from '/static/out/vs/platform/quickinput/common/quickInput.js';
+import { IWorkspaceContextService } from '/static/out/vs/platform/workspace/common/workspace.js';
+import { INotificationService } from '/static/out/vs/platform/notification/common/notification.js';
+import { ICommandService } from '/static/out/vs/platform/commands/common/commands.js';
+import { Schemas } from '/static/out/vs/base/common/network.js';
 
 const WORKSPACE_SCHEME = 'code-server';
 
@@ -83,7 +90,6 @@ class HostFileSystemProvider {
 		if (resource.scheme !== WORKSPACE_SCHEME) {
 			throw createFileSystemProviderError(`unsupported scheme: ${resource.scheme}`, FileSystemProviderErrorCode.Unavailable);
 		}
-
 		const resourcePath = normalizeWorkspacePath(resource.path);
 		if (resourcePath === this.workspaceRootPath) {
 			return '';
@@ -111,223 +117,123 @@ class GoTerminalBackend {
 	}
 
 	setReady() {}
-
-	async attachToProcess() {
-		return undefined;
-	}
-
-	async attachToRevivedProcess() {
-		return undefined;
-	}
-
-	async listProcesses() {
-		return [];
-	}
-
-	async getLatency() {
-		return [];
-	}
-
-	async getDefaultSystemShell() {
-		return '/bin/sh';
-	}
-
+	async attachToProcess() { return undefined; }
+	async attachToRevivedProcess() { return undefined; }
+	async listProcesses() { return []; }
+	async getLatency() { return [{ label: 'local', latency: 0 }]; }
+	async getDefaultSystemShell() { return '/bin/sh'; }
 	async getProfiles() {
-		return [{
-			profileName: 'Default Shell',
-			path: '/bin/sh',
-			isDefault: true
-		}];
+		return [
+			{ profileName: 'zsh', path: '/bin/zsh', isDefault: true },
+			{ profileName: 'bash', path: '/bin/bash' },
+			{ profileName: 'sh', path: '/bin/sh' }
+		];
+	}
+	async getWslPath() { return undefined; }
+	async getEnvironment() { return {}; }
+	async getShellEnvironment() { return {}; }
+	async setEnvironment() {}
+	async refreshEnvironment() { return {}; }
+	async acceptPtyHostResolved() {}
+	async requestDetach() {}
+
+	async createProcess(process, options, shouldPersist) {
+		const id = this._nextId++;
+		const ws = this._openTerminalWS(id, process, options);
+		return {
+			pid: id,
+			shouldPersist: false,
+			onDidChangeProperty: Event.None,
+			onProcessData: ws.onData,
+			onProcessExit: ws.onExit,
+			onProcessReady: ws.onReady,
+			onProcessTitleChanged: Event.None,
+			onProcessOverrideDimensions: Event.None,
+			onProcessResolvedShellLaunchConfig: Event.None,
+			start() {},
+			shutdown(immediate) { ws.close(immediate); },
+			input(data) { ws.send({ type: 'input', data }); },
+			resize(cols, rows) { ws.send({ type: 'resize', cols, rows }); },
+			processBinary(data) { ws.send({ type: 'binary', data }); },
+			acknowledgeDataEvent(charCount) {},
+			setUnicodeVersion() {},
+			getInitialCwd() { return Promise.resolve(this.workspaceRootPath); },
+			getCwd() { return Promise.resolve(this.workspaceRootPath); },
+			getLatency() { return Promise.resolve(0); },
+			orphanQuestion() {},
+			sendKeyEvent() {},
+			sendMouseEvent() {},
+			serializePerformance() {},
+			clearBuffer() {},
+			clearSelection() {},
+			findNext() {},
+			findPrevious() {},
+		};
 	}
 
-	async getWslPath(original) {
-		return original;
-	}
+	_openTerminalWS(id, process, options) {
+		const onData = new Emitter();
+		const onExit = new Emitter();
+		const onReady = new Emitter();
+		let ws, closed = false;
 
-	async getEnvironment() {
-		return {};
-	}
+		const cwd = firstDefinedPath(options?.cwd, process?.cwd);
+		const url = buildURL('/ws/terminal', { cwd });
+		url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 
-	async getShellEnvironment() {
-		return {};
-	}
+		ws = new WebSocket(url.toString());
+		ws.binaryType = 'arraybuffer';
 
-	async setTerminalLayoutInfo() {}
+		ws.onopen = () => {
+			ws.send(JSON.stringify({
+				type: 'create',
+				cols: options?.cols ?? 80,
+				rows: options?.rows ?? 24
+			}));
+			onReady.fire({ pid: id, cwd: cwd || this.workspaceRootPath });
+		};
 
-	async updateTitle() {}
-
-	async updateIcon() {}
-
-	async setNextCommandId() {}
-
-	async getTerminalLayoutInfo() {
-		return undefined;
-	}
-
-	async getPerformanceMarks() {
-		return [];
-	}
-
-	async reduceConnectionGraceTime() {}
-
-	async requestDetachInstance() {
-		return undefined;
-	}
-
-	async acceptDetachInstanceReply() {}
-
-	async persistTerminalState() {}
-
-	async installAutoReply() {}
-
-	async uninstallAllAutoReplies() {}
-
-	restartPtyHost() {}
-
-	async createProcess(shellLaunchConfig, cwd, cols, rows, _unicodeVersion, _env, _options, shouldPersist) {
-		return new GoTerminalPty(
-			this._nextId++,
-			shouldPersist,
-			this.resolveCwd(cwd, shellLaunchConfig),
-			cols,
-			rows
-		);
-	}
-
-	resolveCwd(cwd, shellLaunchConfig) {
-		const candidate = firstDefinedPath(cwd, shellLaunchConfig?.cwd);
-		if (!candidate) {
-			return { absolute: this.workspaceRootPath, relative: '' };
-		}
-
-		const normalized = normalizeWorkspacePath(candidate);
-		if (normalized === this.workspaceRootPath) {
-			return { absolute: normalized, relative: '' };
-		}
-		const prefix = `${this.workspaceRootPath}/`;
-		if (normalized.startsWith(prefix)) {
-			return { absolute: normalized, relative: normalized.slice(prefix.length) };
-		}
-		return { absolute: this.workspaceRootPath, relative: '' };
-	}
-}
-
-class GoTerminalPty extends BasePty {
-	constructor(id, shouldPersist, cwd, cols, rows) {
-		super(id, shouldPersist);
-		this.cwd = cwd;
-		this.cols = cols;
-		this.rows = rows;
-		this.socket = undefined;
-		this.exited = false;
-	}
-
-	async start() {
-		const params = new URLSearchParams();
-		if (this.cwd.relative) {
-			params.set('cwd', this.cwd.relative);
-		}
-		const protocol = mainWindow.location.protocol === 'https:' ? 'wss:' : 'ws:';
-		const query = params.toString();
-		const socketURL = `${protocol}//${mainWindow.location.host}/ws/terminal${query ? `?${query}` : ''}`;
-		this.socket = new WebSocket(socketURL);
-
-		this.socket.addEventListener('open', () => {
-			this.handleDidChangeProperty({ type: ProcessPropertyType.InitialCwd, value: this.cwd.absolute });
-			this.handleDidChangeProperty({ type: ProcessPropertyType.Cwd, value: this.cwd.absolute });
-			this.handleReady({ pid: this.id, cwd: this.cwd.absolute, windowsPty: undefined });
-			this.resize(this.cols, this.rows);
-		});
-
-		this.socket.addEventListener('message', event => {
-			const message = JSON.parse(typeof event.data === 'string' ? event.data : '');
-			switch (message.type) {
-				case 'output':
-					this.handleData(message.data);
-					break;
-				case 'error':
-					this.handleData(`\r\n[error] ${message.message}\r\n`);
-					break;
-				case 'exit':
-					this.handleExitOnce(undefined);
-					break;
+		ws.onmessage = (event) => {
+			if (closed) return;
+			try {
+				const msg = JSON.parse(event.data);
+				if (msg.type === 'data') {
+					onData.fire(msg.data);
+				} else if (msg.type === 'exit') {
+					closed = true;
+					onExit.fire({ code: msg.code });
+				}
+			} catch {
+				onData.fire(new Uint8Array(event.data));
 			}
-		});
+		};
 
-		this.socket.addEventListener('close', () => {
-			this.handleExitOnce(undefined);
-		});
+		ws.onclose = () => {
+			if (!closed) {
+				closed = true;
+				onExit.fire({ code: 0 });
+			}
+		};
 
-		return undefined;
-	}
-
-	shutdown() {
-		this.socket?.close();
-	}
-
-	input(data) {
-		this.send({ type: 'input', data });
-	}
-
-	sendSignal(signal) {
-		if (signal === 'SIGINT') {
-			this.input('\u0003');
-		}
-	}
-
-	async processBinary() {}
-
-	resize(cols, rows) {
-		this.cols = cols;
-		this.rows = rows;
-		if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) {
-			return;
-		}
-		if (this.socket?.readyState !== WebSocket.OPEN) {
-			return;
-		}
-		if (this._lastDimensions.cols === cols && this._lastDimensions.rows === rows) {
-			return;
-		}
-		this._lastDimensions.cols = cols;
-		this._lastDimensions.rows = rows;
-		this.send({ type: 'resize', cols, rows });
-	}
-
-	clearBuffer() {}
-
-	acknowledgeDataEvent() {}
-
-	async setUnicodeVersion() {}
-
-	async refreshProperty(type) {
-		switch (type) {
-			case ProcessPropertyType.Cwd:
-			case ProcessPropertyType.InitialCwd:
-				return this.cwd.absolute;
-			default:
-				return undefined;
-		}
-	}
-
-	async updateProperty(type, value) {
-		if (type === ProcessPropertyType.Cwd && typeof value === 'string') {
-			this.cwd = { absolute: value, relative: '' };
-		}
-	}
-
-	send(message) {
-		if (this.socket?.readyState === WebSocket.OPEN) {
-			this.socket.send(JSON.stringify(message));
-		}
-	}
-
-	handleExitOnce(code) {
-		if (this.exited) {
-			return;
-		}
-		this.exited = true;
-		this.handleExit(code);
+		return {
+			onData: onData.event,
+			onExit: onExit.event,
+			onReady: onReady.event,
+			send(msg) {
+				if (!closed && ws.readyState === WebSocket.OPEN) {
+					ws.send(JSON.stringify(msg));
+				}
+			},
+			close(immediate) {
+				closed = true;
+				if (immediate) {
+					ws.close();
+				} else {
+					ws.send(JSON.stringify({ type: 'exit' }));
+					ws.close();
+				}
+			}
+		};
 	}
 }
 
@@ -347,8 +253,133 @@ class PureGoWorkbench extends Workbench {
 			terminalInstanceService.didRegisterBackend(backend);
 			terminalService.registerProcessSupport(true);
 		});
+		// Enable Open Folder in web
+		instantiationService.invokeFunction(accessor => {
+			try {
+				const contextKeyService = accessor.get(IContextKeyService);
+				contextKeyService.createKey('openFolderWorkspaceSupport', true);
+			} catch (e) {
+				console.warn('[code-server-go] Failed to enable Open Folder:', e);
+			}
+			try {
+				const fileDialogService = accessor.get(IFileDialogService);
+				const quickInputService = accessor.get(IQuickInputService);
+				const notificationService = accessor.get(INotificationService);
+				if (fileDialogService) {
+					// Service accessors are only valid during startup; capture instances for later calls.
+					fileDialogService.pickFolderAndOpen = function(options) {
+						return pickFolderAndOpenCustom({ quickInputService, notificationService }, options);
+					};
+				}
+			} catch (e) {
+				console.warn('[code-server-go] Failed to patch FileDialogService:', e);
+			}
+		});
 		return instantiationService;
 	}
+}
+
+// Custom folder picker that shows a QuickPick with folder navigation
+async function pickFolderAndOpenCustom({ quickInputService, notificationService }, options) {
+	let currentPath = '/';
+	const workspaceUri = URI.from({ scheme: WORKSPACE_SCHEME, path: '/' });
+
+	return new Promise((resolve) => {
+		const picker = quickInputService.createQuickPick();
+		picker.title = 'Open Folder';
+		picker.placeholder = 'Type a path or select a folder...';
+		picker.matchOnLabel = true;
+		picker.matchOnDescription = true;
+		picker.canSelectMany = false;
+		picker.ignoreFocusOut = true;
+
+		// Items for navigation
+		picker.items = [
+			{ label: '$(folder) /', description: 'root', path: '/' },
+		];
+
+		async function browsePath(dirPath) {
+			currentPath = dirPath;
+			picker.busy = true;
+			try {
+				const uri = URI.from({ scheme: WORKSPACE_SCHEME, path: dirPath });
+				const response = await requestJSON('/api/fs/readdir', { path: dirPath === '/' ? '' : dirPath });
+				const entries = (response.entries || []).filter(e => e.isDir).sort((a, b) => a.name.localeCompare(b.name));
+
+				const items = [];
+				// Add ".." if not at root
+				if (dirPath !== '/') {
+					const parentPath = dirPath.substring(0, dirPath.lastIndexOf('/')) || '/';
+					items.push({ label: '$(folder-opened) ..', description: parentPath, path: parentPath, alwaysShow: true });
+				}
+				// Add "select this folder" button
+				items.push({ label: '$(arrow-right) Select this folder', description: dirPath, path: dirPath, select: true, alwaysShow: true });
+
+				for (const entry of entries) {
+					items.push({
+						label: `$(folder) ${entry.name}`,
+						description: `${dirPath === '/' ? '' : dirPath}/${entry.name}`.replace('//', '/'),
+						path: `${dirPath === '/' ? '' : dirPath}/${entry.name}`.replace('//', '/'),
+					});
+				}
+				picker.items = items;
+			} catch (err) {
+				notificationService.error(`Failed to browse: ${err.message}`);
+			} finally {
+				picker.busy = false;
+			}
+		}
+
+		picker.onDidChangeSelection(async (items) => {
+			if (items.length === 0) return;
+			const item = items[0];
+			if (item.select) {
+				// User selected this folder
+				picker.hide();
+				const newUrl = new URL(window.location.href);
+				newUrl.searchParams.set('folder', item.path);
+				window.location.href = newUrl.toString();
+				resolve();
+				return;
+			}
+			// Navigate into the folder
+			await browsePath(item.path);
+		});
+
+		picker.onDidAccept(async () => {
+			// User typed a path and pressed Enter
+			const value = picker.value.trim();
+			if (!value) {
+				// Select current directory
+				const newUrl = new URL(window.location.href);
+				newUrl.searchParams.set('folder', currentPath);
+				window.location.href = newUrl.toString();
+				picker.hide();
+				resolve();
+				return;
+			}
+			// Try to navigate to the typed path
+			const typedPath = value.startsWith('/') ? value : `${currentPath === '/' ? '' : currentPath}/${value}`.replace('//', '/');
+			try {
+				const stat = await requestJSON('/api/fs/stat', { path: typedPath === '/' ? '' : typedPath });
+				if (stat.isDir) {
+					await browsePath(typedPath);
+				} else {
+					notificationService.warning(`Not a directory: ${typedPath}`);
+				}
+			} catch {
+				notificationService.warning(`Path not found: ${typedPath}`);
+			}
+		});
+
+		picker.onDidHide(() => {
+			picker.dispose();
+		});
+
+		picker.show();
+		// Start browsing from root
+		browsePath('/');
+	});
 }
 
 class PureGoBrowserMain extends BrowserMain {
@@ -382,15 +413,9 @@ function toFileStat(entry) {
 
 function firstDefinedPath(...values) {
 	for (const value of values) {
-		if (!value) {
-			continue;
-		}
-		if (typeof value === 'string') {
-			return value;
-		}
-		if (typeof value.path === 'string') {
-			return value.path;
-		}
+		if (!value) continue;
+		if (typeof value === 'string') return value;
+		if (typeof value.path === 'string') return value.path;
 	}
 	return undefined;
 }
@@ -431,15 +456,9 @@ async function toProviderError(response) {
 
 	let code = FileSystemProviderErrorCode.Unknown;
 	switch (response.status) {
-		case 403:
-			code = FileSystemProviderErrorCode.NoPermissions;
-			break;
-		case 404:
-			code = FileSystemProviderErrorCode.FileNotFound;
-			break;
-		case 409:
-			code = FileSystemProviderErrorCode.FileExists;
-			break;
+		case 403: code = FileSystemProviderErrorCode.NoPermissions; break;
+		case 404: code = FileSystemProviderErrorCode.FileNotFound; break;
+		case 409: code = FileSystemProviderErrorCode.FileExists; break;
 	}
 	return createFileSystemProviderError(message, code);
 }
@@ -458,7 +477,7 @@ async function toProviderError(response) {
 		payload: Object.create(null),
 		trusted: true,
 		async open() {
-			return false;
+			return true;
 		}
 	};
 
