@@ -37,15 +37,16 @@ var dirVSCodeRoot = func() string {
 	if hasVSCodeArtifacts(dirRepoRoot) {
 		return dirRepoRoot
 	}
-	log.Panic().Msg("set VSCODE_REPO_ROOT to a VS Code checkout that already has out/, resources/, and node_modules/@xterm")
+	log.Panic().Msg("set VSCODE_REPO_ROOT to a VS Code checkout that has src/, resources/, build/next, and node_modules")
 	return ""
 }()
 
 func hasVSCodeArtifacts(root string) bool {
 	for _, rel := range []string{
-		"out",
+		"src",
 		"resources",
-		filepath.Join("node_modules", "@xterm"),
+		filepath.Join("build", "next", "index.ts"),
+		filepath.Join("node_modules", "@vscode", "codicons"),
 	} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
 			return false
@@ -112,4 +113,16 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	return os.Chmod(dst, mode)
+}
+
+func removeSourceMaps(dir string) error {
+	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(path, ".map") {
+			return os.Remove(path)
+		}
+		return nil
+	})
 }

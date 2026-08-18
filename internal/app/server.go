@@ -34,6 +34,7 @@ type Server struct {
 	templateFS    fs.FS
 	terminalHub   *TerminalHub
 	staticHandler http.Handler
+	staticETag    string
 	httpServer    *http.Server
 }
 
@@ -70,6 +71,7 @@ func New(cfg Config, logger zerolog.Logger) (*Server, error) {
 		staticFS:      staticFS,
 		templateFS:    templateFS,
 		staticHandler: http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))),
+		staticETag:    fmt.Sprintf(`W/"vscgo-%d"`, time.Now().UnixNano()),
 	}
 	s.terminalHub = NewTerminalHub(workspaceRoot, s.log.With().Str("component", "terminal").Logger())
 	return s, nil
@@ -154,7 +156,6 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"WORKBENCH_WEB_CONFIGURATION":  s.asJSON(s.workbenchConfigurationWithRoot(workspaceRoot)),
 		"WORKBENCH_AUTH_SESSION":       "",
 		"WORKBENCH_BUILTIN_EXTENSIONS": "[]",
-		"WORKBENCH_DEV_CSS_MODULES":    string(mustJSON(s.cssModules())),
 	}
 
 	data, err := s.renderTemplate("workbench.html", values)
@@ -188,15 +189,35 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := fs.Stat(s.staticFS, relativePath); err == nil {
-		// Embedded files carry no modtime/etag; without this browsers heuristically
-		// cache stale assets across binary upgrades.
-		w.Header().Set("Cache-Control", "no-cache")
-		s.staticHandler.ServeHTTP(w, r)
+	if _, err := fs.Stat(s.staticFS, relativePath); err != nil {
+		http.NotFound(w, r)
 		return
 	}
 
-	http.NotFound(w, r)
+	// Embedded files carry no modtime/etag; without revalidation browsers
+	// heuristically cache stale assets across binary upgrades. The ETag is
+	// stable for the process lifetime, so repeat visits revalidate with 304s.
+	header := w.Header()
+	header.Set("Cache-Control", "no-cache")
+	header.Set("ETag", s.staticETag)
+	if r.Header.Get("If-None-Match") == s.staticETag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		if gz, err := s.staticFS.Open(relativePath + ".gz"); err == nil {
+			defer gz.Close()
+			if seeker, ok := gz.(io.ReadSeeker); ok {
+				header.Set("Content-Encoding", "gzip")
+				header.Set("Vary", "Accept-Encoding")
+				http.ServeContent(w, r, relativePath, time.Time{}, seeker)
+				return
+			}
+		}
+	}
+
+	s.staticHandler.ServeHTTP(w, r)
 }
 
 func (s *Server) renderTemplate(name string, values map[string]string) ([]byte, error) {
@@ -294,20 +315,6 @@ func (s *Server) vscodeCommit() string {
 
 func (s *Server) workbenchConfiguration() map[string]any {
 	return s.workbenchConfigurationWithRoot(s.workspaceRoot)
-}
-func (s *Server) cssModules() []string {
-	var modules []string
-	_ = fs.WalkDir(s.staticFS, "out/vs", func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		if strings.HasSuffix(path, ".css") {
-			modules = append(modules, strings.TrimPrefix(path, "out/"))
-		}
-		return nil
-	})
-	sort.Strings(modules)
-	return modules
 }
 
 func (s *Server) asJSON(value any) string {

@@ -20,20 +20,32 @@ func build() error {
 	binDir := filepath.Join(dirProjectRoot, "data", "bin")
 	binPath := filepath.Join(binDir, "code-server-go")
 
-	_ = os.RemoveAll(distDir)
-	if err := copyDir(filepath.Join(dirVSCodeRoot, "out"), filepath.Join(distDir, "static", "out")); err != nil {
-		return err
-	}
+	// The workbench CSS references codicon.ttf relative to src/; the file is
+	// gitignored upstream, so stage it from node_modules before bundling.
 	if err := copyFile(
 		filepath.Join(dirVSCodeRoot, "node_modules", "@vscode", "codicons", "dist", "codicon.ttf"),
-		filepath.Join(distDir, "static", "out", "vs", "base", "browser", "ui", "codicons", "codicon", "codicon.ttf"),
+		filepath.Join(dirVSCodeRoot, "src", "vs", "base", "browser", "ui", "codicons", "codicon", "codicon.ttf"),
 		0o644,
 	); err != nil {
+		return err
+	}
+	if err := runCmd(ctx, dirVSCodeRoot, "node", "build/next/index.ts", "bundle", "--out", "out-web-min", "--target", "web", "--minify", "--mangle-privates"); err != nil {
+		return err
+	}
+
+	_ = os.RemoveAll(distDir)
+	if err := copyDir(filepath.Join(dirVSCodeRoot, "out-web-min"), filepath.Join(distDir, "static", "out")); err != nil {
+		return err
+	}
+	// Source maps are dev artifacts; shipping them would bloat the binary by ~70MB.
+	if err := removeSourceMaps(filepath.Join(distDir, "static", "out")); err != nil {
 		return err
 	}
 	if err := copyDir(filepath.Join(dirVSCodeRoot, "resources"), filepath.Join(distDir, "static", "resources")); err != nil {
 		return err
 	}
+	// The integrated terminal loads xterm.js with a plain script tag at
+	// runtime, so it must be served outside the bundle.
 	if err := copyDir(filepath.Join(dirVSCodeRoot, "node_modules", "@xterm"), filepath.Join(distDir, "static", "node_modules", "@xterm")); err != nil {
 		return err
 	}
@@ -80,13 +92,16 @@ func build() error {
 		return err
 	}
 	if err := copyFile(
-		filepath.Join(dirVSCodeRoot, "out", "vs", "code", "browser", "workbench", "callback.html"),
+		filepath.Join(dirVSCodeRoot, "out-web-min", "vs", "code", "browser", "workbench", "callback.html"),
 		filepath.Join(distDir, "templates", "callback.html"),
 		0o644,
 	); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(distDir, "static", "out", "nls.messages.js"), []byte("export {};\n"), 0o644); err != nil {
+
+	// Precompress text assets; handleStatic serves the .gz variant when the
+	// client accepts gzip. The workbench bundle alone is 17MB -> ~4MB.
+	if err := precompressStatic(filepath.Join(distDir, "static")); err != nil {
 		return err
 	}
 
@@ -179,4 +194,36 @@ func extractVSIX(vsixPath, dstDir string) error {
 		}
 	}
 	return nil
+}
+
+var precompressibleExts = map[string]bool{
+	".js":   true,
+	".css":  true,
+	".html": true,
+	".json": true,
+	".svg":  true,
+}
+
+func precompressStatic(dir string) error {
+	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		if !precompressibleExts[strings.ToLower(filepath.Ext(path))] || info.Size() < 1024 {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var buf bytes.Buffer
+		zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+		if _, err := zw.Write(raw); err != nil {
+			return err
+		}
+		if err := zw.Close(); err != nil {
+			return err
+		}
+		return os.WriteFile(path+".gz", buf.Bytes(), 0o644)
+	})
 }

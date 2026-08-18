@@ -1,19 +1,20 @@
-import { mainWindow } from '/static/out/vs/base/browser/window.js';
-import { Emitter, Event } from '/static/out/vs/base/common/event.js';
-import { URI } from '/static/out/vs/base/common/uri.js';
-import { IRemoteAgentHostService, NullRemoteAgentHostService } from '/static/out/vs/platform/agentHost/common/remoteAgentHostService.js';
-import { IFileService, FileChangeType, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, createFileSystemProviderError } from '/static/out/vs/platform/files/common/files.js';
-import { InstantiationType, registerSingleton } from '/static/out/vs/platform/instantiation/common/extensions.js';
-import { IFileDialogService } from '/static/out/vs/platform/dialogs/common/dialogs.js';
-import { IContextKeyService } from '/static/out/vs/platform/contextkey/common/contextkey.js';
-import { Registry } from '/static/out/vs/platform/registry/common/platform.js';
-import '/static/out/vs/workbench/workbench.web.main.js';
-import { BrowserMain } from '/static/out/vs/workbench/browser/web.main.js';
-import { Workbench } from '/static/out/vs/workbench/browser/workbench.js';
-import { BasePty } from '/static/out/vs/workbench/contrib/terminal/common/basePty.js';
-import { ITerminalInstanceService, ITerminalService } from '/static/out/vs/workbench/contrib/terminal/browser/terminal.js';
-import { ProcessPropertyType, TerminalExtensions } from '/static/out/vs/platform/terminal/common/terminal.js';
-import { Schemas } from '/static/out/vs/base/common/network.js';
+import {
+	mainWindow,
+	Emitter, Event,
+	URI,
+	IRemoteAgentHostService, NullRemoteAgentHostService,
+	IFileService, FileChangeType, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, createFileSystemProviderError,
+	InstantiationType, registerSingleton,
+	IFileDialogService,
+	IContextKeyService,
+	Registry,
+	BrowserMain,
+	Workbench,
+	BasePty,
+	ITerminalInstanceService, ITerminalService,
+	ProcessPropertyType, TerminalExtensions,
+	Schemas
+} from '/static/out/vs/code/browser/workbench/codeServerGo.main.js';
 
 const WORKSPACE_SCHEME = 'code-server';
 
@@ -108,6 +109,7 @@ class GoTerminalBackend {
 	async attachToRevivedProcess() { return undefined; }
 	async listProcesses() { return []; }
 	async getLatency() { return [{ label: 'local', latency: 0 }]; }
+	async getPerformanceMarks() { return []; }
 	async getDefaultSystemShell() { return '/bin/sh'; }
 	async getProfiles() {
 		return [

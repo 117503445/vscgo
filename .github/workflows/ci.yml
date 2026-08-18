@@ -10,8 +10,10 @@ on:
 env:
   GO_VERSION: '1.26.1'
   NODE_VERSION: '22.22.1'
-  VSCODE_COMMIT: 50f36fc4ffa240e366be854f001d3f1f7461b0bd
-  ELECTRON_VERSION: 39.8.7
+  # Fork 117503445/vscode branch server-go: carries the codeServerGo.main
+  # bundle entry that the build script bundles with esbuild.
+  VSCODE_COMMIT: edb8776ad3b98629a83d9e807648c1c202577705
+  VSCODE_REPO: https://github.com/117503445/vscode
 
 jobs:
   build:
@@ -35,29 +37,19 @@ jobs:
       - name: Clone VS Code
         if: steps.cache-vscode.outputs.cache-hit != 'true'
         run: |
-          git clone https://github.com/microsoft/vscode /tmp/vscode
+          git clone ${{ env.VSCODE_REPO }} /tmp/vscode
           cd /tmp/vscode && git checkout --detach ${{ env.VSCODE_COMMIT }}
 
       - uses: actions/cache@v4
         with:
-          path: /tmp/vscode/node_modules
+          path: |
+            /tmp/vscode/node_modules
+            /tmp/vscode/build/node_modules
           key: vscode-npm-${{ env.VSCODE_COMMIT }}
-
-      - name: Install native build deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential libkrb5-dev libx11-dev libxkbfile-dev libsecret-1-dev pkg-config
 
       - name: npm ci
         working-directory: /tmp/vscode
         run: npm ci
-        env:
-          npm_config_runtime: electron
-          npm_config_target: ${{ env.ELECTRON_VERSION }}
-          npm_config_disturl: https://artifacts.electronjs.org/headers/dist
-          npm_config_build_from_source: 'true'
-
-      - name: gulp compile-client
-        working-directory: /tmp/vscode
-        run: npm run gulp compile-client
 
       - name: Download built-in extensions
         run: bash scripts/download-extensions.sh
