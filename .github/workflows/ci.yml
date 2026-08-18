@@ -27,6 +27,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - uses: actions/cache@v4
+        id: cache-vscode
         with:
           path: /tmp/vscode
           key: vscode-${{ env.VSCODE_COMMIT }}
