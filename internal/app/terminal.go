@@ -75,7 +75,7 @@ func (s *TerminalSession) Run(ctx context.Context, conn *websocket.Conn) error {
 		for {
 			n, err := s.ptmx.Read(buf)
 			if n > 0 {
-				if writeErr := writeWSJSON(ctx, conn, terminalMessage{Type: "output", Data: string(buf[:n])}); writeErr != nil {
+				if writeErr := writeWSJSON(ctx, conn, terminalMessage{Type: "data", Data: string(buf[:n])}); writeErr != nil {
 					writeErrCh <- writeErr
 					return
 				}
