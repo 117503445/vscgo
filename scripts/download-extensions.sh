@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXT_DIR="$(cd "$(dirname "$0")/../web/static/extensions" && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+EXT_DIR="$REPO_ROOT/web/static/extensions"
 mkdir -p "$EXT_DIR"
 
 # Extension: publisher.name version
