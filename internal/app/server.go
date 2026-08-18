@@ -125,14 +125,12 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Support ?folder= query parameter for workspace switching.
-	// The parameter is relative to the configured workspace root.
+	// Absolute paths are honored directly (like code-server); relative paths
+	// resolve under the configured workspace root.
 	folderParam := r.URL.Query().Get("folder")
 	workspaceRoot := s.workspaceRoot
 	if folderParam != "" {
-		if !strings.HasPrefix(folderParam, "/") {
-			folderParam = "/" + folderParam
-		}
-		if resolved, ok := s.resolveFolderWithinWorkspace(folderParam); ok {
+		if resolved, ok := s.resolveFolderParam(folderParam); ok {
 			workspaceRoot = resolved
 			// Set cookie for subsequent API calls
 			http.SetCookie(w, &http.Cookie{
@@ -155,7 +153,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"WORKBENCH_WEB_BASE_URL":       "/static",
 		"WORKBENCH_WEB_CONFIGURATION":  s.asJSON(s.workbenchConfigurationWithRoot(workspaceRoot)),
 		"WORKBENCH_AUTH_SESSION":       "",
-		"WORKBENCH_BUILTIN_EXTENSIONS": s.builtinExtensionsJSON(),
+		"WORKBENCH_BUILTIN_EXTENSIONS": "[]",
 		"WORKBENCH_DEV_CSS_MODULES":    string(mustJSON(s.cssModules())),
 	}
 
@@ -273,8 +271,25 @@ func (s *Server) workbenchConfigurationWithRoot(root string) map[string]any {
 		},
 		"productConfiguration": map[string]any{
 			"enableTelemetry": false,
+			"commit":          s.vscodeCommit(),
 		},
 	}
+}
+
+// vscodeCommit reads the commit of the embedded VS Code build so the workbench
+// treats this as a built distribution.
+func (s *Server) vscodeCommit() string {
+	data, err := fs.ReadFile(s.staticFS, "product.json")
+	if err != nil {
+		return ""
+	}
+	var product struct {
+		Commit string `json:"commit"`
+	}
+	if err := json.Unmarshal(data, &product); err != nil {
+		return ""
+	}
+	return product.Commit
 }
 
 func (s *Server) workbenchConfiguration() map[string]any {
@@ -615,18 +630,35 @@ func (s *Server) statPath(r *http.Request, rel string) (FileEntry, error) {
 	}, nil
 }
 
-func (s *Server) resolveFolderWithinWorkspace(folder string) (string, bool) {
-	resolved, err := filepath.Abs(filepath.Join(s.workspaceRoot, folder))
-	if err != nil {
-		return "", false
+func (s *Server) resolveFolderParam(folder string) (string, bool) {
+	folder = strings.TrimSpace(folder)
+	var resolved string
+	if filepath.IsAbs(folder) {
+		resolved = filepath.Clean(folder)
+	} else {
+		var err error
+		resolved, err = filepath.Abs(filepath.Join(s.workspaceRoot, folder))
+		if err != nil {
+			return "", false
+		}
+		if resolved != s.workspaceRoot && !strings.HasPrefix(resolved, s.workspaceRoot+string(os.PathSeparator)) {
+			return "", false
+		}
 	}
-	if resolved != s.workspaceRoot && !strings.HasPrefix(resolved, s.workspaceRoot+string(os.PathSeparator)) {
+	info, err := os.Stat(resolved)
+	if err != nil || !info.IsDir() {
 		return "", false
 	}
 	return resolved, true
 }
 
 func (s *Server) resolvePathForRequest(r *http.Request, rel string) (string, error) {
+	clean := filepath.Clean(strings.TrimSpace(rel))
+	if filepath.IsAbs(clean) {
+		// The workbench file provider speaks in absolute host paths (code-server parity).
+		return clean, nil
+	}
+
 	root := s.workspaceRoot
 	if cookie, err := r.Cookie("code-server-go-folder"); err == nil && cookie.Value != "" {
 		// Cookie is client-supplied; only honor absolute paths inside the workspace root.
@@ -635,8 +667,7 @@ func (s *Server) resolvePathForRequest(r *http.Request, rel string) (string, err
 			root = candidate
 		}
 	}
-	clean := filepath.Clean(strings.TrimSpace(rel))
-	if clean == "." || clean == "" {
+	if clean == "." {
 		return root, nil
 	}
 	target := filepath.Join(root, clean)

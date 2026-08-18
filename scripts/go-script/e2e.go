@@ -24,6 +24,16 @@ type e2eResult struct {
 	Observations []string `json:"observations"`
 }
 
+type scenarioConfig struct {
+	Name string
+}
+
+var e2eScenarios = []scenarioConfig{
+	{Name: "local-dev-flow"},
+	{Name: "open-folder"},
+	{Name: "builtin-extensions"},
+}
+
 func runE2E() error {
 	ctx := context.Background()
 	if err := build(); err != nil {
@@ -35,27 +45,37 @@ func runE2E() error {
 		return err
 	}
 
-	result, err := runLocalE2E(ctx, runDir)
-	if err != nil {
-		result.Status = "failed"
-		result.Observations = append(result.Observations, err.Error())
+	var results []e2eResult
+	var hasFailure bool
+	for _, sc := range e2eScenarios {
+		result, err := runScenarioE2E(ctx, runDir, sc)
+		results = append(results, result)
+		if err != nil {
+			hasFailure = true
+		}
 	}
 
 	reportPath := filepath.Join(runDir, "report.md")
-	if err := os.WriteFile(reportPath, []byte(renderReport(runDir, []e2eResult{result})), 0o644); err != nil {
+	if err := os.WriteFile(reportPath, []byte(renderReport(runDir, results)), 0o644); err != nil {
 		return err
 	}
 
 	log.Info().Str("report", reportPath).Msg("e2e finished")
-	if err != nil {
-		return fmt.Errorf("e2e failed, see %s", reportPath)
+	if hasFailure {
+		passed := 0
+		for _, r := range results {
+			if r.Status == "passed" {
+				passed++
+			}
+		}
+		return fmt.Errorf("%d/%d scenarios failed, see %s", len(results)-passed, len(results), reportPath)
 	}
 	return nil
 }
 
-func runLocalE2E(ctx context.Context, runDir string) (e2eResult, error) {
-	result := e2eResult{Scenario: "local-dev-flow", Status: "failed"}
-	outputDir := filepath.Join(runDir, "local")
+func runScenarioE2E(ctx context.Context, runDir string, sc scenarioConfig) (e2eResult, error) {
+	result := e2eResult{Scenario: sc.Name, Status: "failed"}
+	outputDir := filepath.Join(runDir, sc.Name)
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return result, err
 	}
@@ -67,6 +87,14 @@ func runLocalE2E(ctx context.Context, runDir string) (e2eResult, error) {
 
 	workspaceFile := filepath.Join(workspaceDir, "playground.txt")
 	if err := os.WriteFile(workspaceFile, []byte("original from e2e\n"), 0o644); err != nil {
+		return result, err
+	}
+
+	subDir := filepath.Join(workspaceDir, "subdir")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		return result, err
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "nested.txt"), []byte("nested from e2e\n"), 0o644); err != nil {
 		return result, err
 	}
 
@@ -107,7 +135,7 @@ func runLocalE2E(ctx context.Context, runDir string) (e2eResult, error) {
 	out, err := outputCmdAllowFailure(ctx, dirVSCodeRoot, "node",
 		filepath.Join(dirProjectRoot, "scripts", "playwright", "e2e.mjs"),
 		"--url", url,
-		"--scenario", result.Scenario,
+		"--scenario", sc.Name,
 		"--output-dir", outputDir,
 		"--workspace-file", workspaceFile,
 	)
@@ -124,6 +152,8 @@ func runLocalE2E(ctx context.Context, runDir string) (e2eResult, error) {
 
 	return result, nil
 }
+
+
 
 func stopProcess(cmd *exec.Cmd, waitCh <-chan error) {
 	if cmd.Process == nil {

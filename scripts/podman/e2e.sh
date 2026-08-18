@@ -38,18 +38,31 @@ podman run -d --rm \
 sleep 2
 
 set +e
-runner_output=$(
-	podman run --rm \
-		--network "container:${app_container}" \
-		-v "${output_dir}:/output" \
-		-v "${workspace_dir}:/workspace" \
-		"${e2e_image_name}" \
-		--url "http://127.0.0.1:8080" \
-		--scenario "container-dev-flow" \
-		--output-dir /output \
-		--workspace-file /workspace/playground.txt
-)
-runner_status=$?
+overall_status=0
+for scenario in local-dev-flow builtin-extensions open-folder-ui; do
+	scenario_output_dir="${output_dir}/${scenario}"
+	mkdir -p "${scenario_output_dir}"
+
+	runner_output=$(
+		podman run --rm \
+			--network "container:${app_container}" \
+			-v "${scenario_output_dir}:/output" \
+			-v "${workspace_dir}:/workspace" \
+			"${e2e_image_name}" \
+			--url "http://127.0.0.1:8080" \
+			--scenario "${scenario}" \
+			--output-dir /output \
+			--workspace-file /workspace/playground.txt
+	)
+	scenario_status=$?
+
+	printf '%s\n' "${runner_output}" > "${scenario_output_dir}/result.json"
+
+	if [ "${scenario_status}" -ne 0 ]; then
+		overall_status=1
+	fi
+done
+runner_status=${overall_status}
 set -e
 
 printf '%s\n' "${runner_output}" > "${result_json_path}"

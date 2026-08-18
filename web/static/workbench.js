@@ -13,10 +13,6 @@ import { Workbench } from '/static/out/vs/workbench/browser/workbench.js';
 import { BasePty } from '/static/out/vs/workbench/contrib/terminal/common/basePty.js';
 import { ITerminalInstanceService, ITerminalService } from '/static/out/vs/workbench/contrib/terminal/browser/terminal.js';
 import { ProcessPropertyType, TerminalExtensions } from '/static/out/vs/platform/terminal/common/terminal.js';
-import { IQuickInputService } from '/static/out/vs/platform/quickinput/common/quickInput.js';
-import { IWorkspaceContextService } from '/static/out/vs/platform/workspace/common/workspace.js';
-import { INotificationService } from '/static/out/vs/platform/notification/common/notification.js';
-import { ICommandService } from '/static/out/vs/platform/commands/common/commands.js';
 import { Schemas } from '/static/out/vs/base/common/network.js';
 
 const WORKSPACE_SCHEME = 'code-server';
@@ -25,8 +21,7 @@ performance.mark('code/didLoadWorkbenchMain');
 registerSingleton(IRemoteAgentHostService, NullRemoteAgentHostService, InstantiationType.Delayed);
 
 class HostFileSystemProvider {
-	constructor(workspaceRootPath) {
-		this.workspaceRootPath = normalizeWorkspacePath(workspaceRootPath);
+	constructor() {
 		this.capabilities = FileSystemProviderCapabilities.FileReadWrite | FileSystemProviderCapabilities.PathCaseSensitive;
 		this.onDidChangeCapabilities = Event.None;
 		this._onDidChangeFile = new Emitter();
@@ -38,22 +33,22 @@ class HostFileSystemProvider {
 	}
 
 	async stat(resource) {
-		const payload = await requestJSON('/api/fs/stat', { path: this.resourceToRelativePath(resource) });
+		const payload = await requestJSON('/api/fs/stat', { path: this.resourceToPath(resource) });
 		return toFileStat(payload);
 	}
 
 	async readdir(resource) {
-		const payload = await requestJSON('/api/fs/readdir', { path: this.resourceToRelativePath(resource) });
+		const payload = await requestJSON('/api/fs/readdir', { path: this.resourceToPath(resource) });
 		return payload.entries.map(entry => [entry.name, entry.isDir ? FileType.Directory : FileType.File]);
 	}
 
 	async readFile(resource) {
-		const response = await request('/api/fs/file', { path: this.resourceToRelativePath(resource) });
+		const response = await request('/api/fs/file', { path: this.resourceToPath(resource) });
 		return new Uint8Array(await response.arrayBuffer());
 	}
 
 	async writeFile(resource, content) {
-		await request('/api/fs/file', { path: this.resourceToRelativePath(resource) }, {
+		await request('/api/fs/file', { path: this.resourceToPath(resource) }, {
 			method: 'PUT',
 			headers: { 'Content-Type': 'application/octet-stream' },
 			body: content
@@ -62,12 +57,12 @@ class HostFileSystemProvider {
 	}
 
 	async mkdir(resource) {
-		await request('/api/fs/mkdir', { path: this.resourceToRelativePath(resource) }, { method: 'POST' });
+		await request('/api/fs/mkdir', { path: this.resourceToPath(resource) }, { method: 'POST' });
 		this._onDidChangeFile.fire([{ type: FileChangeType.ADDED, resource }]);
 	}
 
 	async delete(resource) {
-		await request('/api/fs/entry', { path: this.resourceToRelativePath(resource) }, { method: 'DELETE' });
+		await request('/api/fs/entry', { path: this.resourceToPath(resource) }, { method: 'DELETE' });
 		this._onDidChangeFile.fire([{ type: FileChangeType.DELETED, resource }]);
 	}
 
@@ -76,8 +71,8 @@ class HostFileSystemProvider {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
-				from: this.resourceToRelativePath(from),
-				to: this.resourceToRelativePath(to)
+				from: this.resourceToPath(from),
+				to: this.resourceToPath(to)
 			})
 		});
 		this._onDidChangeFile.fire([
@@ -86,19 +81,11 @@ class HostFileSystemProvider {
 		]);
 	}
 
-	resourceToRelativePath(resource) {
+	resourceToPath(resource) {
 		if (resource.scheme !== WORKSPACE_SCHEME) {
 			throw createFileSystemProviderError(`unsupported scheme: ${resource.scheme}`, FileSystemProviderErrorCode.Unavailable);
 		}
-		const resourcePath = normalizeWorkspacePath(resource.path);
-		if (resourcePath === this.workspaceRootPath) {
-			return '';
-		}
-		const prefix = `${this.workspaceRootPath}/`;
-		if (!resourcePath.startsWith(prefix)) {
-			throw createFileSystemProviderError('resource is outside the workspace', FileSystemProviderErrorCode.NoPermissions);
-		}
-		return resourcePath.slice(prefix.length);
+		return normalizeWorkspacePath(resource.path);
 	}
 }
 
@@ -263,123 +250,16 @@ class PureGoWorkbench extends Workbench {
 			}
 			try {
 				const fileDialogService = accessor.get(IFileDialogService);
-				const quickInputService = accessor.get(IQuickInputService);
-				const notificationService = accessor.get(INotificationService);
-				if (fileDialogService) {
-					// Service accessors are only valid during startup; capture instances for later calls.
-					fileDialogService.pickFolderAndOpen = function(options) {
-						return pickFolderAndOpenCustom({ quickInputService, notificationService }, options);
-					};
-				}
+				// Stock VS Code appends the local 'file' scheme for non-file dialogs,
+				// which surfaces a "Show Local" button that opens a native picker our
+				// provider cannot serve. Keep dialogs on the built-in provider only.
+				fileDialogService.addFileSchemaIfNeeded = (schema) => schema === Schemas.untitled ? [Schemas.file] : [schema];
 			} catch (e) {
 				console.warn('[code-server-go] Failed to patch FileDialogService:', e);
 			}
 		});
 		return instantiationService;
 	}
-}
-
-// Custom folder picker that shows a QuickPick with folder navigation
-async function pickFolderAndOpenCustom({ quickInputService, notificationService }, options) {
-	let currentPath = '/';
-	const workspaceUri = URI.from({ scheme: WORKSPACE_SCHEME, path: '/' });
-
-	return new Promise((resolve) => {
-		const picker = quickInputService.createQuickPick();
-		picker.title = 'Open Folder';
-		picker.placeholder = 'Type a path or select a folder...';
-		picker.matchOnLabel = true;
-		picker.matchOnDescription = true;
-		picker.canSelectMany = false;
-		picker.ignoreFocusOut = true;
-
-		// Items for navigation
-		picker.items = [
-			{ label: '$(folder) /', description: 'root', path: '/' },
-		];
-
-		async function browsePath(dirPath) {
-			currentPath = dirPath;
-			picker.busy = true;
-			try {
-				const uri = URI.from({ scheme: WORKSPACE_SCHEME, path: dirPath });
-				const response = await requestJSON('/api/fs/readdir', { path: dirPath === '/' ? '' : dirPath });
-				const entries = (response.entries || []).filter(e => e.isDir).sort((a, b) => a.name.localeCompare(b.name));
-
-				const items = [];
-				// Add ".." if not at root
-				if (dirPath !== '/') {
-					const parentPath = dirPath.substring(0, dirPath.lastIndexOf('/')) || '/';
-					items.push({ label: '$(folder-opened) ..', description: parentPath, path: parentPath, alwaysShow: true });
-				}
-				// Add "select this folder" button
-				items.push({ label: '$(arrow-right) Select this folder', description: dirPath, path: dirPath, select: true, alwaysShow: true });
-
-				for (const entry of entries) {
-					items.push({
-						label: `$(folder) ${entry.name}`,
-						description: `${dirPath === '/' ? '' : dirPath}/${entry.name}`.replace('//', '/'),
-						path: `${dirPath === '/' ? '' : dirPath}/${entry.name}`.replace('//', '/'),
-					});
-				}
-				picker.items = items;
-			} catch (err) {
-				notificationService.error(`Failed to browse: ${err.message}`);
-			} finally {
-				picker.busy = false;
-			}
-		}
-
-		picker.onDidChangeSelection(async (items) => {
-			if (items.length === 0) return;
-			const item = items[0];
-			if (item.select) {
-				// User selected this folder
-				picker.hide();
-				const newUrl = new URL(window.location.href);
-				newUrl.searchParams.set('folder', item.path);
-				window.location.href = newUrl.toString();
-				resolve();
-				return;
-			}
-			// Navigate into the folder
-			await browsePath(item.path);
-		});
-
-		picker.onDidAccept(async () => {
-			// User typed a path and pressed Enter
-			const value = picker.value.trim();
-			if (!value) {
-				// Select current directory
-				const newUrl = new URL(window.location.href);
-				newUrl.searchParams.set('folder', currentPath);
-				window.location.href = newUrl.toString();
-				picker.hide();
-				resolve();
-				return;
-			}
-			// Try to navigate to the typed path
-			const typedPath = value.startsWith('/') ? value : `${currentPath === '/' ? '' : currentPath}/${value}`.replace('//', '/');
-			try {
-				const stat = await requestJSON('/api/fs/stat', { path: typedPath === '/' ? '' : typedPath });
-				if (stat.isDir) {
-					await browsePath(typedPath);
-				} else {
-					notificationService.warning(`Not a directory: ${typedPath}`);
-				}
-			} catch {
-				notificationService.warning(`Path not found: ${typedPath}`);
-			}
-		});
-
-		picker.onDidHide(() => {
-			picker.dispose();
-		});
-
-		picker.show();
-		// Start browsing from root
-		browsePath('/');
-	});
 }
 
 class PureGoBrowserMain extends BrowserMain {
@@ -390,7 +270,7 @@ class PureGoBrowserMain extends BrowserMain {
 
 	createWorkbench(domElement, serviceCollection, logService) {
 		const fileService = serviceCollection.get(IFileService);
-		fileService.registerProvider(WORKSPACE_SCHEME, new HostFileSystemProvider(this.workspaceRootPath));
+		fileService.registerProvider(WORKSPACE_SCHEME, new HostFileSystemProvider());
 		return new PureGoWorkbench(domElement, undefined, serviceCollection, logService, this.workspaceRootPath);
 	}
 }
@@ -476,13 +356,28 @@ async function toProviderError(response) {
 		workspace: { folderUri },
 		payload: Object.create(null),
 		trusted: true,
-		async open() {
+		async open(workspace) {
+			const target = workspace?.folderUri;
+			if (target && target.scheme === WORKSPACE_SCHEME) {
+				const url = new URL('/', mainWindow.location.origin);
+				url.searchParams.set('folder', target.path);
+				mainWindow.location.assign(url.toString());
+			}
 			return true;
 		}
 	};
 
+	// VS Code expects UriComponents pointing at unpacked extension directories;
+	// the server advertises .vsix paths for validation, so map them here.
+	const builtinExtensions = (config.additionalBuiltinExtensions ?? []).map(ext => ({
+		scheme: mainWindow.location.protocol.replace(':', ''),
+		authority: mainWindow.location.host,
+		path: ext.path.replace(/\.vsix$/, '')
+	}));
+
 	new PureGoBrowserMain(mainWindow.document.body, {
 		...config,
+		additionalBuiltinExtensions: builtinExtensions,
 		settingsSyncOptions: config.settingsSyncOptions ? { enabled: config.settingsSyncOptions.enabled } : undefined,
 		workspaceProvider
 	}, folderUri.path).open();

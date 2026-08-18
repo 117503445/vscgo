@@ -3,3 +3,5 @@ dist/
 /scripts/go-script/go-script
 /fe/dist/
 /fe/node_modules/
+/scripts/playwright/node_modules/
+/web/static/extensions/

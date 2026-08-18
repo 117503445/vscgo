@@ -155,6 +155,9 @@ func resolveWithin(root string, rel string) (string, error) {
 	if strings.TrimSpace(rel) == "" {
 		return root, nil
 	}
+	if filepath.IsAbs(rel) {
+		return filepath.Clean(rel), nil
+	}
 	target := filepath.Join(root, filepath.Clean(rel))
 	target, err := filepath.Abs(target)
 	if err != nil {

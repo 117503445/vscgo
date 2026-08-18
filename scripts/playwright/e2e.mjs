@@ -92,43 +92,22 @@ async function openExplorerFile(page, fileName) {
 	});
 }
 
-const url = arg('--url');
-const scenario = arg('--scenario');
-const outputDir = arg('--output-dir');
-const workspaceFile = arg('--workspace-file');
-const workspaceFileName = path.basename(workspaceFile);
-const screenshots = [];
-const observations = [];
-const websocketUrls = [];
-const terminalWebsocketUrls = [];
-const relevantConsoleErrors = [];
-const allConsoleErrors = [];
-const expectedFileContent = 'edited in browser e2e\n';
-const terminalFile = path.join(path.dirname(workspaceFile), 'terminal-output.txt');
-const terminalCommand = `echo terminal-ok > ${terminalFile}`;
-const { chromium } = await loadPlaywright();
-const chromiumArgs = ['--disable-dev-shm-usage'];
-if (typeof process.getuid === 'function' && process.getuid() === 0) {
-	chromiumArgs.push('--no-sandbox', '--disable-setuid-sandbox');
-}
+// ─── Scenario: local-dev-flow ─────────────────────────────────────────────
 
-fs.rmSync(terminalFile, { force: true });
+async function runLocalDevFlow({ page, url, outputDir, workspaceFile }) {
+	const workspaceFileName = path.basename(workspaceFile);
+	const screenshots = [];
+	const observations = [];
+	const websocketUrls = [];
+	const terminalWebsocketUrls = [];
+	const relevantConsoleErrors = [];
+	const allConsoleErrors = [];
+	const expectedFileContent = 'edited in browser e2e\n';
+	const terminalFile = path.join(path.dirname(workspaceFile), 'terminal-output.txt');
+	const terminalCommand = `echo terminal-ok > ${terminalFile}`;
 
-let browser;
+	fs.rmSync(terminalFile, { force: true });
 
-try {
-	browser = await chromium.launch({ headless: true, executablePath: chromiumPath(), args: chromiumArgs });
-
-	await waitFor(async () => {
-		try {
-			const health = await fetch(new URL('/healthz', url));
-			return health.ok;
-		} catch {
-			return false;
-		}
-	}, 30000, 'healthz did not become ready');
-
-	const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 	page.on('websocket', ws => {
 		websocketUrls.push(ws.url());
 		if (ws.url().includes('/ws/terminal')) {
@@ -238,14 +217,323 @@ try {
 		observations.push(`Ignored non-blocking console errors: ${allConsoleErrors.length}`);
 	}
 
+	return { status: 'passed', observations, screenshots };
+}
+
+// ─── Scenario: open-folder ──────────────────────────────────────────────────
+//
+// Asserts the built-in VS Code SimpleFileDialog experience (same as
+// code-server): title "Open Folder", a path input pre-filled with an absolute
+// path, a directory-only listing, ".." navigation, click-to-enter directories,
+// no "Show Local" button, and accept -> reload into the chosen folder.
+
+async function runOpenFolder({ page, url, outputDir, workspaceFile }) {
+	const observations = [];
+	const screenshots = [];
+	const workspaceDir = path.dirname(workspaceFile);
+	const workspaceDirName = path.basename(workspaceDir);
+
+	const widgetSelector = '.quick-input-widget';
+	const inputSelector = '.quick-input-widget input';
+	const rowSelector = '.quick-input-widget .quick-input-list .monaco-list-row';
+
+	async function widgetInputValue() {
+		return page.evaluate(sel => document.querySelector(sel)?.value ?? '', inputSelector);
+	}
+	function rowLabelOf(row) {
+		return row.querySelector('.label-name')?.textContent?.trim() ?? '';
+	}
+	async function waitForRow(name, timeoutMs = 15000) {
+		await page.waitForFunction(
+			({ sel, expected }) => Array.from(document.querySelectorAll(sel)).some(row => (row.querySelector('.label-name')?.textContent?.trim() ?? '') === expected),
+			{ sel: rowSelector, expected: name },
+			{ timeout: timeoutMs }
+		);
+	}
+	async function clickRow(name) {
+		await waitForRow(name);
+		await page.evaluate(({ sel, expected }) => {
+			const row = Array.from(document.querySelectorAll(sel)).find(node => (node.querySelector('.label-name')?.textContent?.trim() ?? '') === expected);
+			if (!row) throw new Error(`row not found: ${expected}`);
+			for (const type of ['mousedown', 'mouseup', 'click']) {
+				row.dispatchEvent(new MouseEvent(type, { bubbles: true, detail: type === 'click' ? 1 : 0 }));
+			}
+		}, { sel: rowSelector, expected: name });
+	}
+
+	await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+	await waitFor(async () => {
+		if ((await page.locator('.monaco-workbench').count()) > 0) {
+			return true;
+		}
+		return (await page.title().catch(() => '')).includes('Code - OSS');
+	}, 60000, 'workbench did not render');
+	await dismissOnboarding(page);
+	await page.waitForTimeout(3000);
+	observations.push('Workbench rendered for Open Folder test');
+	await shot(page, outputDir, screenshots, '01-workbench');
+
+	await runCommandPalette(page, 'File: Open Folder');
+
+	await page.waitForFunction(
+		sel => /Open Folder/i.test(document.querySelector(`${sel} .quick-input-title`)?.textContent ?? ''),
+		widgetSelector,
+		{ timeout: 20000 }
+	);
+	observations.push('Dialog title is "Open Folder"');
+
+	await page.waitForFunction(sel => (document.querySelector(sel)?.value ?? '').startsWith('/'), inputSelector, { timeout: 15000 });
+	const initialPath = await widgetInputValue();
+	observations.push(`Path input pre-filled with absolute path: ${initialPath}`);
+
+	const widgetText = await page.evaluate(sel => document.querySelector(sel)?.textContent ?? '', widgetSelector);
+	if (/show local/i.test(widgetText)) {
+		throw new Error('SimpleFileDialog shows a "Show Local" button, diverging from code-server UX');
+	}
+	observations.push('No "Show Local" button in the dialog');
+
+	await page.waitForFunction(sel => document.querySelectorAll(sel).length > 0, rowSelector, { timeout: 15000 });
+	observations.push('Directory listing rendered');
+	await shot(page, outputDir, screenshots, '02-dialog-initial');
+
+	// The initial directory depends on history, so type the absolute workspace
+	// path (code-server supports typing paths) to reach a known listing.
+	const typedPath = `${workspaceDir}/`;
+	await page.locator(inputSelector).fill(typedPath);
+	await waitForRow('subdir');
+	await waitForRow('..');
+	const typedValue = await widgetInputValue();
+	if (!typedValue.endsWith(`/${workspaceDirName}/`)) {
+		throw new Error(`input did not stay at typed path: ${typedValue}`);
+	}
+	observations.push(`Typed path ${typedPath}; listing shows subdir and ".."`);
+
+	await clickRow('..');
+	await waitForRow(workspaceDirName);
+	const parentValue = await widgetInputValue();
+	if (!parentValue.endsWith(`/${path.basename(path.dirname(workspaceDir))}/`)) {
+		throw new Error(`".." did not navigate to parent: ${parentValue}`);
+	}
+	observations.push('".." navigated up to the parent directory');
+
+	await clickRow(workspaceDirName);
+	await waitForRow('subdir');
+	const backValue = await widgetInputValue();
+	if (backValue !== typedValue) {
+		throw new Error(`re-entering ${workspaceDirName} changed path: ${backValue}`);
+	}
+	observations.push(`Click navigated back into ${backValue}`);
+
+	await clickRow('subdir');
+	const subdirValue = await widgetInputValue();
+	if (!subdirValue.endsWith('/subdir/')) {
+		throw new Error(`input did not navigate into subdir: ${subdirValue}`);
+	}
+	observations.push(`Navigated into ${subdirValue}`);
+	await shot(page, outputDir, screenshots, '03-dialog-subdir');
+
+	const navigation = page.waitForURL(u => new URL(u).searchParams.has('folder'), { timeout: 60000 });
+	await page.locator(inputSelector).press('Enter');
+	await navigation;
+	const folderParam = new URL(page.url()).searchParams.get('folder') ?? '';
+	if (!folderParam.endsWith(path.join(workspaceDirName, 'subdir'))) {
+		throw new Error(`unexpected folder param after accept: ${folderParam}`);
+	}
+	observations.push(`Accept opened ?folder=${folderParam}`);
+
+	await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 60000, 'workbench did not reload into the new folder');
+	await dismissOnboarding(page);
+	const nestedItem = page.getByRole('treeitem', { name: /nested\.txt/ });
+	await nestedItem.waitFor({ state: 'visible', timeout: 30000 });
+	observations.push('Explorer shows subdir file "nested.txt" after folder switch');
+	await shot(page, outputDir, screenshots, '04-opened');
+
+	return { status: 'passed', observations, screenshots };
+}
+
+
+// ─── Scenario: builtin-extensions ───────────────────────────────────────────
+
+async function runBuiltinExtensions({ page, url, outputDir, workspaceFile }) {
+	const observations = [];
+	const screenshots = [];
+
+	await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+	await waitFor(async () => {
+		if ((await page.locator('.monaco-workbench').count()) > 0) {
+			return true;
+		}
+		return (await page.title().catch(() => '')).includes('Code - OSS');
+	}, 60000, 'workbench did not render');
+	await dismissOnboarding(page);
+	await page.waitForTimeout(3000);
+	observations.push('Workbench rendered for builtin-extensions test');
+	await shot(page, outputDir, screenshots, '01-workbench');
+
+	// Read the builtin extensions from the workbench configuration
+	// (the vscode-workbench-builtin-extensions meta may be consumed by VS Code at boot)
+	const builtinExtensions = await page.evaluate(() => {
+		const configMeta = document.getElementById('vscode-workbench-web-configuration');
+		if (!configMeta) {
+			throw new Error('missing workbench configuration meta');
+		}
+		const config = JSON.parse(configMeta.dataset.settings ?? '{}');
+		return config.additionalBuiltinExtensions || [];
+	});
+
+	observations.push('Builtin extensions count: ' + builtinExtensions.length);
+
+	// Verify required extensions are present
+	const requiredExtensions = [
+		'pkief.material-icon-theme',
+		'mechatroner.rainbow-csv',
+		'iliazeus.vscode-ansi',
+		'njzy.stats-bar',
+		'tomoki1207.pdf',
+		'humao.rest-client',
+		'mhutchie.git-graph',
+	];
+
+	for (const extName of requiredExtensions) {
+		const found = builtinExtensions.some(ext => ext.name === extName);
+		if (found) {
+			observations.push('Extension registered: ' + extName);
+		} else {
+			throw new Error('Missing builtin extension: ' + extName);
+		}
+	}
+
+	// Verify each VSIX file is accessible (non-empty)
+	for (const ext of builtinExtensions) {
+		const vsixUrl = new URL(ext.path, url).href;
+		const response = await fetch(vsixUrl);
+		if (!response.ok) {
+			throw new Error('VSIX not accessible: ' + ext.path + ' (HTTP ' + response.status + ')');
+		}
+		const body = await response.arrayBuffer();
+		if (body.byteLength < 1024) {
+			throw new Error('VSIX too small: ' + ext.path + ' (' + body.byteLength + ' bytes)');
+		}
+		observations.push('VSIX served: ' + ext.path + ' (' + body.byteLength + ' bytes)');
+	}
+
+	// Material icon theme must actually apply to explorer icons
+	const workspaceFileName = path.basename(workspaceFile);
+	const fileTreeItem = page.getByRole('treeitem', { name: new RegExp(escapeRegExp(workspaceFileName)) });
+	await fileTreeItem.waitFor({ state: 'visible', timeout: 30000 });
+
+	await runCommandPalette(page, 'Preferences: File Icon Theme');
+	const themeInput = page.locator('.quick-input-widget input').first();
+	await themeInput.waitFor({ state: 'visible', timeout: 10000 });
+	await themeInput.fill('Material Icon Theme');
+	await page.waitForFunction(
+		() => Array.from(document.querySelectorAll('.quick-input-list .monaco-list-row')).some(node => node.textContent?.includes('Material Icon Theme')),
+		null,
+		{ timeout: 15000 }
+	);
+	observations.push('File Icon Theme picker lists "Material Icon Theme"');
+	await page.keyboard.press('Enter');
+	observations.push('Selected "Material Icon Theme"');
+
+	await waitFor(async () => {
+		return page.evaluate(() => {
+			for (const label of Array.from(document.querySelectorAll('.explorer-folders-view .monaco-icon-label'))) {
+				const bg = getComputedStyle(label, '::before').backgroundImage;
+				if (bg.includes('pkief.material-icon-theme')) {
+					return true;
+				}
+			}
+			return false;
+		});
+	}, 20000, 'explorer icons did not switch to material-icon-theme');
+	observations.push('Explorer icons render from pkief.material-icon-theme resources');
+
+	await shot(page, outputDir, screenshots, '02-material-icons');
+
+	return { status: 'passed', observations, screenshots };
+}
+
+// ─── Scenario registry ──────────────────────────────────────────────────────
+
+const scenarios = {
+	'local-dev-flow': runLocalDevFlow,
+	'open-folder': runOpenFolder,
+	'builtin-extensions': runBuiltinExtensions,
+};
+
+// ─── Main ───────────────────────────────────────────────────────────────────
+
+const url = arg('--url');
+const scenario = arg('--scenario');
+const outputDir = arg('--output-dir');
+const workspaceFile = arg('--workspace-file');
+
+const runScenario = scenarios[scenario];
+if (!runScenario) {
+	const result = { scenario, status: 'failed', url, screenshots: [], observations: ['Unknown scenario: ' + scenario] };
+	console.log(JSON.stringify(result));
+	process.exit(1);
+}
+
+const { chromium } = await loadPlaywright();
+const chromiumArgs = ['--disable-dev-shm-usage'];
+if (typeof process.getuid === 'function' && process.getuid() === 0) {
+	chromiumArgs.push('--no-sandbox', '--disable-setuid-sandbox');
+}
+
+let browser;
+try {
+	browser = await chromium.launch({ headless: true, executablePath: chromiumPath(), args: chromiumArgs });
+
+	await waitFor(async () => {
+		try {
+			const health = await fetch(new URL('/healthz', url));
+			return health.ok;
+		} catch { return false; }
+	}, 30000, 'healthz did not become ready');
+
+	const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+
+	let result;
+	try {
+		result = await runScenario({ page, url, outputDir, workspaceFile });
+	} catch (error) {
+		const observations = [String(error)];
+		try {
+			observations.push('URL at failure: ' + page.url());
+			const widgetState = await page.evaluate(() => {
+				const w = document.querySelector('.quick-input-widget');
+				if (!w) return null;
+				return {
+					title: w.querySelector('.quick-input-title')?.textContent ?? null,
+					input: w.querySelector('input')?.value ?? null,
+					rows: Array.from(w.querySelectorAll('.monaco-list-row')).map(r => r.textContent?.trim()).slice(0, 15),
+				};
+			});
+			if (widgetState) {
+				observations.push('QuickInput at failure: ' + JSON.stringify(widgetState));
+			}
+			const file = path.join(outputDir, 'failure.png');
+			await page.screenshot({ path: file, fullPage: true });
+			result = { status: 'failed', observations, screenshots: [file] };
+		} catch {
+			result = { status: 'failed', observations, screenshots: [] };
+		}
+	}
 	await page.close();
-	console.log(JSON.stringify({ scenario, status: 'passed', url, screenshots, observations }));
+
+	const finalResult = {
+		scenario,
+		status: result.status,
+		url,
+		screenshots: result.screenshots || [],
+		observations: result.observations || [],
+	};
+	console.log(JSON.stringify(finalResult));
+	process.exitCode = finalResult.status === 'passed' ? 0 : 1;
 } catch (error) {
-	observations.push(String(error));
-	console.log(JSON.stringify({ scenario, status: 'failed', url, screenshots, observations }));
+	console.log(JSON.stringify({ scenario, status: 'failed', url, screenshots: [], observations: [String(error)] }));
 	process.exitCode = 1;
 } finally {
-	if (browser) {
-		await browser.close();
-	}
+	if (browser) await browser.close();
 }
