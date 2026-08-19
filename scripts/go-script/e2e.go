@@ -33,6 +33,7 @@ var e2eScenarios = []scenarioConfig{
 	{Name: "open-folder"},
 	{Name: "builtin-extensions"},
 	{Name: "syntax-highlight"},
+	{Name: "upload-download"},
 }
 
 func runE2E() error {
@@ -108,6 +109,11 @@ func runScenarioE2E(ctx context.Context, runDir string, sc scenarioConfig) (e2eR
 		if err := os.WriteFile(filepath.Join(workspaceDir, name), []byte(content), 0o644); err != nil {
 			return result, err
 		}
+	}
+
+	// upload target for the upload-download scenario
+	if err := os.MkdirAll(filepath.Join(workspaceDir, "uploads"), 0o755); err != nil {
+		return result, err
 	}
 
 	port, err := randomPort()

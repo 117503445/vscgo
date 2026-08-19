@@ -49,12 +49,20 @@ class HostFileSystemProvider {
 	}
 
 	async writeFile(resource, content) {
+		// The explorer ignores UPDATED events for children it has not seen, so a
+		// newly uploaded file must fire ADDED or it stays invisible until refresh.
+		let existed = true;
+		try {
+			await this.stat(resource);
+		} catch {
+			existed = false;
+		}
 		await request('/api/fs/file', { path: this.resourceToPath(resource) }, {
 			method: 'PUT',
 			headers: { 'Content-Type': 'application/octet-stream' },
 			body: content
 		});
-		this._onDidChangeFile.fire([{ type: FileChangeType.UPDATED, resource }]);
+		this._onDidChangeFile.fire([{ type: existed ? FileChangeType.UPDATED : FileChangeType.ADDED, resource }]);
 	}
 
 	async mkdir(resource) {

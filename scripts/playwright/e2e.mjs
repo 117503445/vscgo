@@ -532,6 +532,85 @@ async function runSyntaxHighlight({ page, url, outputDir, workspaceFile }) {
 	return { status: 'passed', observations, screenshots };
 }
 
+// ─── Scenario: upload-download ────────────────────────────────────────────────
+//
+// Upload: right-click the "uploads" folder in the explorer, pick "Upload..."
+// (workbench command explorer.upload, web-only), answer the browser file
+// chooser, then assert the file shows up in the explorer AND its bytes landed
+// in the workspace directory on the server side (the e2e workspace is local,
+// so the server side is just the local disk).
+// Download: right-click the uploaded file, pick "Download..." (explorer.download),
+// capture the browser download and assert byte-equality with the source.
+
+async function runUploadDownload({ page, url, outputDir, workspaceFile }) {
+	const observations = [];
+	const screenshots = [];
+	const workspaceDir = path.dirname(workspaceFile);
+
+	const uploadContent = 'uploaded by e2e 上传下载 ✓\nsecond line 0123456789\n';
+	const uploadSourcePath = path.join(outputDir, 'upload-source.txt');
+	fs.writeFileSync(uploadSourcePath, uploadContent);
+
+	await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+	await waitFor(async () => {
+		if ((await page.locator('.monaco-workbench').count()) > 0) {
+			return true;
+		}
+		return (await page.title().catch(() => '')).includes('Code - OSS');
+	}, 60000, 'workbench did not render');
+	await dismissOnboarding(page, 12000);
+	observations.push('Workbench rendered for upload-download test');
+
+	const uploadsFolder = page.getByRole('treeitem', { name: /uploads/ });
+	await uploadsFolder.waitFor({ state: 'visible', timeout: 30000 });
+	await openExplorerFile(page, 'uploads'); // expand so the uploaded child becomes visible
+	await shot(page, outputDir, screenshots, '01-workbench');
+
+	async function explorerMenuAction(itemName, actionLabel, waitEvent) {
+		const item = page.getByRole('treeitem', { name: new RegExp(escapeRegExp(itemName)) });
+		await item.waitFor({ state: 'visible', timeout: 30000 });
+		await item.click({ button: 'right' });
+		const menuItem = page.getByRole('menuitem', { name: actionLabel });
+		await menuItem.waitFor({ state: 'visible', timeout: 10000 });
+		// The context menu swallows clicks that land before it has fully
+		// initialized (menu stays open, command never runs); let it settle.
+		await page.waitForTimeout(500);
+		if (waitEvent === 'filechooser') {
+			const [chooser] = await Promise.all([page.waitForEvent('filechooser'), menuItem.click()]);
+			return chooser;
+		}
+		const [download] = await Promise.all([page.waitForEvent('download'), menuItem.click()]);
+		return download;
+	}
+
+	const chooser = await explorerMenuAction('uploads', 'Upload...', 'filechooser');
+	await chooser.setFiles(uploadSourcePath);
+	const uploadedItem = page.getByRole('treeitem', { name: /upload-source\.txt/ });
+	await uploadedItem.waitFor({ state: 'visible', timeout: 30000 });
+	observations.push('Uploaded file appears in the explorer');
+
+	await waitFor(async () => {
+		const target = path.join(workspaceDir, 'uploads', 'upload-source.txt');
+		return fs.existsSync(target) && fs.readFileSync(target, 'utf8') === uploadContent;
+	}, 30000, 'uploaded content did not land in uploads/upload-source.txt on the server');
+	observations.push('Uploaded file content matches on the server side');
+
+	const download = await explorerMenuAction('upload-source.txt', 'Download...', 'download');
+	const downloadPath = await download.path();
+	if (!downloadPath) {
+		throw new Error('download did not produce a file');
+	}
+	const downloaded = fs.readFileSync(downloadPath);
+	if (downloaded.toString('utf8') !== uploadContent) {
+		throw new Error(`downloaded content mismatch: got ${JSON.stringify(downloaded.toString('utf8'))}`);
+	}
+	observations.push(`Downloaded ${download.suggestedFilename()} with identical content (${downloaded.length} bytes)`);
+
+	await shot(page, outputDir, screenshots, '02-upload-download');
+
+	return { status: 'passed', observations, screenshots };
+}
+
 // ─── Scenario registry ──────────────────────────────────────────────────────
 
 const scenarios = {
@@ -539,6 +618,7 @@ const scenarios = {
 	'open-folder': runOpenFolder,
 	'builtin-extensions': runBuiltinExtensions,
 	'syntax-highlight': runSyntaxHighlight,
+	'upload-download': runUploadDownload,
 };
 
 // ─── Main ───────────────────────────────────────────────────────────────────
