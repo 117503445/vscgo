@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -29,6 +30,14 @@ func build() error {
 	); err != nil {
 		return err
 	}
+	// Stage declarative built-in extensions (grammars, themes, snippets) into
+	// .build/web/extensions: the bundler inlines this list into the bundle, and
+	// the files are served under /static/extensions below.
+	stagedExtensions, err := stageWebExtensions()
+	if err != nil {
+		return err
+	}
+	log.Info().Int("count", stagedExtensions).Msg("staged declarative builtin extensions")
 	if err := runCmd(ctx, dirVSCodeRoot, "node", "build/next/index.ts", "bundle", "--out", "out-web-min", "--target", "web", "--minify", "--mangle-privates"); err != nil {
 		return err
 	}
@@ -49,11 +58,34 @@ func build() error {
 	if err := copyDir(filepath.Join(dirVSCodeRoot, "node_modules", "@xterm"), filepath.Join(distDir, "static", "node_modules", "@xterm")); err != nil {
 		return err
 	}
+	// TextMate tokenization loads vscode-textmate/vscode-oniguruma at runtime
+	// via importAMDNodeModule; encoding support loads iconv-lite/jschardet and
+	// markdown math preview loads katex. All are plain script-tag/wasm loads
+	// resolved under /static/node_modules, so they must be served unbundled.
+	for _, mod := range []string{
+		"vscode-oniguruma",
+		"vscode-textmate",
+		"jschardet",
+		"katex",
+	} {
+		if err := copyDir(filepath.Join(dirVSCodeRoot, "node_modules", mod), filepath.Join(distDir, "static", "node_modules", mod)); err != nil {
+			return fmt.Errorf("copy node module %s: %w", mod, err)
+		}
+	}
+	if err := copyDir(filepath.Join(dirVSCodeRoot, "node_modules", "@vscode", "iconv-lite-umd"), filepath.Join(distDir, "static", "node_modules", "@vscode", "iconv-lite-umd")); err != nil {
+		return fmt.Errorf("copy node module @vscode/iconv-lite-umd: %w", err)
+	}
 	if err := copyFile(
 		filepath.Join(dirVSCodeRoot, "product.json"),
 		filepath.Join(distDir, "static", "product.json"),
 		0o644,
 	); err != nil {
+		return err
+	}
+	// A source checkout's product.json has no commit, but the workbench treats
+	// an empty commit as "not built" and then ignores the builtin extension
+	// list baked into the bundle. Stamp the vscode repo commit instead.
+	if err := stampProductCommit(ctx, filepath.Join(distDir, "static", "product.json")); err != nil {
 		return err
 	}
 	// Copy built-in extensions (downloaded into web/static/extensions)
@@ -70,6 +102,14 @@ func build() error {
 		if err := extractExtensions(filepath.Join(distDir, "static", "extensions")); err != nil {
 			return err
 		}
+	}
+	// Ship the staged built-in extensions at /static/extensions: that is where
+	// builtinExtensionsPath ('vs/../../extensions') resolves at runtime.
+	if err := copyDir(
+		filepath.Join(dirVSCodeRoot, ".build", "web", "extensions"),
+		filepath.Join(distDir, "static", "extensions"),
+	); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Join(distDir, "static", "code-server-go"), 0o755); err != nil {
 		return err
@@ -114,6 +154,75 @@ func build() error {
 
 	log.Info().Str("binary", binPath).Str("dist", distDir).Msg("build completed")
 	return nil
+}
+
+// stampProductCommit writes the vscode repo's HEAD commit into product.json.
+func stampProductCommit(ctx context.Context, productPath string) error {
+	commit, err := outputCmd(ctx, dirVSCodeRoot, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("resolve vscode commit: %w", err)
+	}
+	raw, err := os.ReadFile(productPath)
+	if err != nil {
+		return err
+	}
+	var product map[string]any
+	if err := json.Unmarshal(raw, &product); err != nil {
+		return err
+	}
+	product["commit"] = strings.TrimSpace(commit)
+	out, err := json.Marshal(product)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(productPath, out, 0o644)
+}
+
+// stageWebExtensions copies VS Code's declarative built-in extensions — those
+// without main/browser code, i.e. grammars, themes and snippets — from
+// extensions/ into .build/web/extensions. Extensions with code are skipped:
+// they would need the upstream per-extension npm install + compile pipeline.
+func stageWebExtensions() (int, error) {
+	src := filepath.Join(dirVSCodeRoot, "extensions")
+	dst := filepath.Join(dirVSCodeRoot, ".build", "web", "extensions")
+	if err := os.RemoveAll(dst); err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return 0, err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return 0, err
+	}
+	staged := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		manifestPath := filepath.Join(src, entry.Name(), "package.json")
+		raw, err := os.ReadFile(manifestPath)
+		if err != nil {
+			continue
+		}
+		var manifest map[string]any
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			continue
+		}
+		if _, hasCode := manifest["main"]; hasCode {
+			continue
+		}
+		if _, hasCode := manifest["browser"]; hasCode {
+			continue
+		}
+		if err := copyDir(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
+			return 0, err
+		}
+		// Declarative extensions must not ship a node_modules dir.
+		_ = os.RemoveAll(filepath.Join(dst, entry.Name(), "node_modules"))
+		staged++
+	}
+	return staged, nil
 }
 
 // extractExtensions unpacks every *.vsix in dir into a sibling directory named
@@ -202,6 +311,7 @@ var precompressibleExts = map[string]bool{
 	".html": true,
 	".json": true,
 	".svg":  true,
+	".wasm": true,
 }
 
 func precompressStatic(dir string) error {

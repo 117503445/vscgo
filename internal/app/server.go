@@ -285,6 +285,7 @@ func (s *Server) workbenchConfigurationWithRoot(root string) map[string]any {
 			"terminal.integrated.enablePersistentSessions": false,
 			"terminal.integrated.shellIntegration.enabled": false,
 			"workbench.startupEditor":                      "none",
+			"workbench.iconTheme":                          "material-icon-theme",
 		},
 		"windowIndicator": map[string]any{
 			"label":   "$(browser) code-server-go",

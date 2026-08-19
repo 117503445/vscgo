@@ -32,6 +32,7 @@ var e2eScenarios = []scenarioConfig{
 	{Name: "local-dev-flow"},
 	{Name: "open-folder"},
 	{Name: "builtin-extensions"},
+	{Name: "syntax-highlight"},
 }
 
 func runE2E() error {
@@ -96,6 +97,17 @@ func runScenarioE2E(ctx context.Context, runDir string, sc scenarioConfig) (e2eR
 	}
 	if err := os.WriteFile(filepath.Join(subDir, "nested.txt"), []byte("nested from e2e\n"), 0o644); err != nil {
 		return result, err
+	}
+
+	syntaxFixtures := map[string]string{
+		"main.go":     "// comment\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n",
+		"main.py":     "# comment\nimport os\n\n\ndef main():\n    print(\"hello\", 42)\n",
+		"config.json": "{\n\t\"name\": \"demo\",\n\t\"version\": 1,\n\t\"enabled\": true\n}\n",
+	}
+	for name, content := range syntaxFixtures {
+		if err := os.WriteFile(filepath.Join(workspaceDir, name), []byte(content), 0o644); err != nil {
+			return result, err
+		}
 	}
 
 	port, err := randomPort()

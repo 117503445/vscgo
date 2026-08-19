@@ -61,7 +61,12 @@ async function shot(page, outputDir, screenshots, name) {
 	screenshots.push(file);
 }
 
-async function dismissOnboarding(page) {
+async function dismissOnboarding(page, appearTimeoutMs = 0) {
+	if (appearTimeoutMs > 0) {
+		// The onboarding dialog can appear several seconds after the workbench
+		// renders, so give it a chance to show up before deciding it is absent.
+		await page.locator('.onboarding-a-overlay.visible').waitFor({ state: 'visible', timeout: appearTimeoutMs }).catch(() => {});
+	}
 	const skip = page.getByRole('button', { name: 'Skip' });
 	if (await skip.isVisible().catch(() => false)) {
 		await skip.click({ force: true });
@@ -132,7 +137,7 @@ async function runLocalDevFlow({ page, url, outputDir, workspaceFile }) {
 		}
 		return (await page.title().catch(() => '')).includes('Code - OSS');
 	}, 60000, 'workbench did not render');
-	await dismissOnboarding(page);
+	await dismissOnboarding(page, 12000);
 	await page.waitForFunction(() => document.title.includes('Code - OSS'), null, { timeout: 60000 });
 	observations.push('Official VS Code workbench rendered');
 	await shot(page, outputDir, screenshots, '01-workbench');
@@ -268,7 +273,7 @@ async function runOpenFolder({ page, url, outputDir, workspaceFile }) {
 		}
 		return (await page.title().catch(() => '')).includes('Code - OSS');
 	}, 60000, 'workbench did not render');
-	await dismissOnboarding(page);
+	await dismissOnboarding(page, 12000);
 	await page.waitForTimeout(3000);
 	observations.push('Workbench rendered for Open Folder test');
 	await shot(page, outputDir, screenshots, '01-workbench');
@@ -365,7 +370,7 @@ async function runBuiltinExtensions({ page, url, outputDir, workspaceFile }) {
 		}
 		return (await page.title().catch(() => '')).includes('Code - OSS');
 	}, 60000, 'workbench did not render');
-	await dismissOnboarding(page);
+	await dismissOnboarding(page, 12000);
 	await page.waitForTimeout(3000);
 	observations.push('Workbench rendered for builtin-extensions test');
 	await shot(page, outputDir, screenshots, '01-workbench');
@@ -417,10 +422,27 @@ async function runBuiltinExtensions({ page, url, outputDir, workspaceFile }) {
 		observations.push('VSIX served: ' + ext.path + ' (' + body.byteLength + ' bytes)');
 	}
 
-	// Material icon theme must actually apply to explorer icons
+	// Material icon theme must be the DEFAULT file icon theme on a fresh
+	// profile (no manual selection), so icons are material on first visit.
 	const workspaceFileName = path.basename(workspaceFile);
 	const fileTreeItem = page.getByRole('treeitem', { name: new RegExp(escapeRegExp(workspaceFileName)) });
 	await fileTreeItem.waitFor({ state: 'visible', timeout: 30000 });
+
+	async function explorerUsesMaterialIcons() {
+		return page.evaluate(() => {
+			for (const label of Array.from(document.querySelectorAll('.explorer-folders-view .monaco-icon-label'))) {
+				const bg = getComputedStyle(label, '::before').backgroundImage;
+				if (bg.includes('pkief.material-icon-theme')) {
+					return true;
+				}
+			}
+			return false;
+		});
+	}
+
+	await waitFor(explorerUsesMaterialIcons, 20000, 'default file icon theme is not material-icon-theme on fresh load');
+	observations.push('Material icon theme is the default file icon theme');
+	await shot(page, outputDir, screenshots, '02-material-default');
 
 	await runCommandPalette(page, 'Preferences: File Icon Theme');
 	const themeInput = page.locator('.quick-input-widget input').first();
@@ -436,19 +458,76 @@ async function runBuiltinExtensions({ page, url, outputDir, workspaceFile }) {
 	observations.push('Selected "Material Icon Theme"');
 
 	await waitFor(async () => {
-		return page.evaluate(() => {
-			for (const label of Array.from(document.querySelectorAll('.explorer-folders-view .monaco-icon-label'))) {
-				const bg = getComputedStyle(label, '::before').backgroundImage;
-				if (bg.includes('pkief.material-icon-theme')) {
-					return true;
-				}
-			}
-			return false;
-		});
+		return explorerUsesMaterialIcons();
 	}, 20000, 'explorer icons did not switch to material-icon-theme');
 	observations.push('Explorer icons render from pkief.material-icon-theme resources');
 
 	await shot(page, outputDir, screenshots, '02-material-icons');
+
+	return { status: 'passed', observations, screenshots };
+}
+
+// ─── Scenario: syntax-highlight ─────────────────────────────────────────────
+//
+// Opens Go/Python/JSON files and asserts TextMate tokenization is active:
+// tokens in the editor must render in at least two distinct colors, which only
+// happens when the builtin grammar extensions are registered and a theme with
+// token colors (theme-defaults) applies.
+
+async function runSyntaxHighlight({ page, url, outputDir, workspaceFile }) {
+	const observations = [];
+	const screenshots = [];
+
+	await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+	await waitFor(async () => {
+		if ((await page.locator('.monaco-workbench').count()) > 0) {
+			return true;
+		}
+		return (await page.title().catch(() => '')).includes('Code - OSS');
+	}, 60000, 'workbench did not render');
+	await dismissOnboarding(page, 12000);
+	await page.waitForTimeout(3000);
+	observations.push('Workbench rendered for syntax-highlight test');
+
+	const cases = [
+		{ file: 'main.go', marker: 'package main', minClasses: 4 },
+		{ file: 'main.py', marker: 'def main', minClasses: 4 },
+		{ file: 'config.json', marker: '"name"', minClasses: 3 },
+	];
+
+	for (const c of cases) {
+		const item = page.getByRole('treeitem', { name: new RegExp(escapeRegExp(c.file)) });
+		await item.waitFor({ state: 'visible', timeout: 30000 });
+		await openExplorerFile(page, c.file);
+		await page.waitForFunction(
+			// Monaco renders some spaces as U+00A0 in view-lines; normalize first.
+			expected => (document.querySelector('.editor-instance .view-lines')?.textContent?.replace(/\u00a0/g, ' ').includes(expected)) ?? false,
+			c.marker,
+			{ timeout: 30000 }
+		);
+		observations.push(`Editor opened ${c.file}`);
+
+		// Distinct mtkN classes prove TextMate tokenization; without a grammar
+		// every token is mtk1. Bracket-pair colors would fake a color-based
+		// assertion, so count token type classes instead.
+		let distinctClasses = 0;
+		await waitFor(async () => {
+			distinctClasses = await page.evaluate(() => {
+				const classes = new Set();
+				for (const span of document.querySelectorAll('.editor-instance .view-line span[class*="mtk"]')) {
+					for (const cls of span.classList) {
+						if (/^mtk\d+$/.test(cls)) {
+							classes.add(cls);
+						}
+					}
+				}
+				return classes.size;
+			});
+			return distinctClasses >= c.minClasses;
+		}, 30000, `${c.file}: expected at least ${c.minClasses} distinct mtk token classes, got ${distinctClasses} (grammar not active?)`);
+		observations.push(`${c.file} renders with ${distinctClasses} distinct token classes`);
+	}
+	await shot(page, outputDir, screenshots, '02-syntax-highlight');
 
 	return { status: 'passed', observations, screenshots };
 }
@@ -459,6 +538,7 @@ const scenarios = {
 	'local-dev-flow': runLocalDevFlow,
 	'open-folder': runOpenFolder,
 	'builtin-extensions': runBuiltinExtensions,
+	'syntax-highlight': runSyntaxHighlight,
 };
 
 // ─── Main ───────────────────────────────────────────────────────────────────
