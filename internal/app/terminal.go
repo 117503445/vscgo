@@ -144,11 +144,23 @@ func defaultShell() (string, []string) {
 	if runtime.GOOS == "windows" {
 		return "cmd.exe", nil
 	}
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
+	if shell := os.Getenv("SHELL"); shell != "" {
+		if path, err := exec.LookPath(shell); err == nil {
+			return path, nil
+		}
 	}
-	return shell, nil
+	for _, name := range []string{"zsh", "bash", "sh"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+		for _, dir := range []string{"/bin", "/usr/bin", "/usr/local/bin", "/run/current-system/sw/bin"} {
+			path := filepath.Join(dir, name)
+			if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+				return path, nil
+			}
+		}
+	}
+	return "/bin/sh", nil
 }
 
 func resolveWithin(root string, rel string) (string, error) {
